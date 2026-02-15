@@ -17,10 +17,22 @@ from scipy.stats import pearsonr
 from spectres import spectres
 from mpl_toolkits.axes_grid1 import AxesGrid
 
+from scipy.optimize import curve_fit
+from scipy.special import hermite
 
 
+# -----GAUSS-HERMITE---------------------------------------------------------------------------------------------
+def gauss_hermite(x, A, mu, sigma, h3, h4):
+    """
+    Gauss-Hermite series expansion:
+    A * exp(-(x-mu)^2/(2*sigma^2)) * [1 + h3*H3((x-mu)/sigma) + h4*H4((x-mu)/sigma)]
+    """
+    x_std = (x - mu) / sigma
+    H3 = (2*np.sqrt(2)*x_std**3 - 3*np.sqrt(2)*x_std) / np.sqrt(6)
+    H4 = (4*x_std**4 - 12*x_std**2 + 3) / np.sqrt(24)
+    return A * np.exp(-0.5 * x_std**2) * (1 + h3*H3 + h4*H4)
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_age_metal_grid_2d(distri1, distri2, title1, title2, age_grid_2d, metal_grid_2d, linear_age=False, threshold=0, **kwargs):
     '''
     plot two series values along the age/metallicity grid with different title
@@ -30,7 +42,7 @@ def plot_age_metal_grid_2d(distri1, distri2, title1, title2, age_grid_2d, metal_
     :param title2:
     :param age_bins:
     :param metal_bins:
-    :param age_grid_2d:
+    :param age_grid_2d:cg
     :param metal_grid_2d:
     :param linear_age:
     :param kwargs:
@@ -56,7 +68,7 @@ def plot_age_metal_grid_2d(distri1, distri2, title1, title2, age_grid_2d, metal_
     # plt.tight_layout()
     return fig
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_sfh_list(ax, mass_frac_list, age_grid_list, labels, colors, text=None, title=None, linear_age=True,
                   plot_xlabel=True, plot_ylabel=True, plot_legend=True, logmass=True, plot_ylim=None, perbinsize=True,
                   fraction_type='mass fraction', **kwargs):
@@ -119,6 +131,7 @@ def plot_sfh_list(ax, mass_frac_list, age_grid_list, labels, colors, text=None, 
         ax.text(0.05, 0.95, text, ha="left", va="top", rotation=0, size=12, transform=ax.transAxes)
     return ax
 
+# ----------------------------------------------------------------------------------------------------------------
 def plot_sfh_stairs_list(ax, mass_frac_list, age_grid_list, age_border_list, labels, colors, text=None, title=None, linear_age=True,
                   plot_xlabel=True, plot_ylabel=True, plot_legend=True, logmass=True, plot_ylim=None, perbinsize=True, fraction_type='mass fraction'):
     '''
@@ -187,7 +200,7 @@ def plot_sfh_stairs_list(ax, mass_frac_list, age_grid_list, age_border_list, lab
     ax.get_yaxis().get_major_formatter().set_useOffset(False)
     return ax
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_metal_list(ax, mass_frac_list, metal_grid_list, labels, colors, text=None, title=None, 
                     plot_xlabel=True, plot_ylabel=True, plot_legend=True, logmass=True, perbinsize=True, fraction_type='mass fraction', **kwargs):
     '''
@@ -231,6 +244,7 @@ def plot_metal_list(ax, mass_frac_list, metal_grid_list, labels, colors, text=No
         ax.text(0.05, 0.95, text, ha="left", va="top", rotation=0, size=12, transform=ax.transAxes)
     return ax
 
+# ----------------------------------------------------------------------------------------------------------------
 def plot_metal_stairs_list(ax, mass_frac_list, metal_grid_list, metal_border_list, labels, colors, text=None, title=None, 
                     plot_xlabel=True, plot_ylabel=True, plot_legend=True, logmass=True, perbinsize=True, fraction_type='mass fraction'):
     '''
@@ -275,7 +289,7 @@ def plot_metal_stairs_list(ax, mass_frac_list, metal_grid_list, metal_border_lis
         ax.text(0.05, 0.95, text, ha="left", va="top", rotation=0, size=12, transform=ax.transAxes)
     return ax
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_cumulative_sfh_list(ax, cumulative_mass_list, age_grid_list, age_border_list, labels, colors, text=None, title=None, linear_age=True,
                   plot_xlabel=True, plot_ylabel=True, plot_legend=True, plot_ylim=None):
     '''
@@ -319,7 +333,7 @@ def plot_cumulative_sfh_list(ax, cumulative_mass_list, age_grid_list, age_border
     ax.get_yaxis().get_major_formatter().set_useOffset(False)
     return ax
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_cumulative_metal_list(ax, cumulative_mass_list, metal_grid_list, metal_border_list, labels, colors, text=None, title=None,
                     plot_xlabel=True, plot_ylabel=True, plot_legend=True, fraction_type='mass fraction'):
     '''
@@ -352,7 +366,7 @@ def plot_cumulative_metal_list(ax, cumulative_mass_list, metal_grid_list, metal_
         ax.text(0.05, 0.95, text, ha="left", va="top", rotation=0, size=12, transform=ax.transAxes)
     return ax
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def plot_weights_2d(ax, xgrid, ygrid, weights, threshold, title, plot_xlabel,
                     plot_ylabel, xlabel="log Age (yr)", ylabel="[M/H]",
                     nodots=False, colorbar=True, **kwargs):
@@ -379,7 +393,7 @@ def plot_weights_2d(ax, xgrid, ygrid, weights, threshold, title, plot_xlabel,
 
     return pc
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim):
     r_range_list = []
     z_range_list = []
@@ -407,54 +421,260 @@ def cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim):
             j_list.append(j)
     return r_range_list, z_range_list, distri_bin_list, i_list, j_list
 
+#-----------------------------------------------------------------------------------------------------------
+def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
+                          reg_dim, reg_dim_true, results_table,
+                          metal_grid, metal_grid_true,
+                          fraction_type='mass fraction'):
 
-def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d, reg_dim, reg_dim_true, results_table,
-                          metal_grid, metal_grid_true, fraction_type='mass fraction'):
 
-    fig, axes = plt.subplots(len(zbin) - 1, len(rbin) - 1, figsize=(2 * (len(rbin) - 1), 1.8 * (len(zbin) - 1)), sharey=True)
+    """
+	MDF PANEL PLOTTING MODIFICATIONS: 
+		Trimming: 
+			The MDF panels have been trimmed to showcase Radius_Projected bins for 5<Rproj/kpc<11
+			The |z| bins remain untouched 
+		Blue Curve: 
+			Displaying only the alpha slice of [α/Fe]=0.0  (index 0) in blue. 
+		Normalization:
+			Each BLUE curve normalized by its own total (sum over [M/H] bins), so each MDF integrates to 1 within that (R_proj,|z|) bin.
+    """
+
+    blue = 'deepskyblue'
+
+    # ---------------- TUNABLE TEXT SIZES ---------------- 
+    panel_fs = 12          # z/R panel labels
+    moment_fs = 11         # moment text size
+    moment_dy = 0.070      # vertical spacing between moment lines
+    title_y_z = 0.965      # z label vertical position
+    title_y_r = 0.875      # R label vertical position
+
+    fit_results = []
+
+    # ---------------- TRIMMED RADIUS BINS ---------------- 
+    target_rbins = [(5, 7), (7, 9), (9, 11)]
+
+    # Trimmed figure set-up: n_z x 3 grid
+    nz = len(zbin) - 1
+    nr = 3
 
 
-    r_range_list, z_range_list, distri_bin_list, i_list, j_list = cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim)
-    r_range_list, z_range_list, distri_bin_true_list, i_list, j_list = cal_rz_distri_bin(rbin, zbin, d, results_table, weights_true_values, reg_dim_true)
+    # Bin distributions
+    r_range_list, z_range_list, distri_bin_list, i_list, j_list = cal_rz_distri_bin(
+        rbin, zbin, d, results_table, weights_values, reg_dim
+    )
+    _, _, distri_bin_true_list, _, _ = cal_rz_distri_bin(
+        rbin, zbin, d, results_table, weights_true_values, reg_dim_true
+    )
 
+    # Mapping each bin to its k index
+    bin_map = {}
     for k in range(len(distri_bin_list)):
+        r0, r1 = r_range_list[k]
+        z0, z1 = z_range_list[k]
+        if (r0, r1) in target_rbins:
+            bin_map[(z0, z1, r0, r1)] = k
 
-        axes[-j_list[k] - 1, i_list[k]].tick_params(direction="in")
-        if -j_list[k] - 1 != -1:
-            axes[-j_list[k] - 1, i_list[k]].xaxis.set_ticklabels([])
-        axes[-j_list[k] - 1, i_list[k]].text(0.5, 0.98, '%s<|z|/kpc<%s' % (z_range_list[k][0], z_range_list[k][1]), ha='center', va='top',
-                             transform=axes[-j_list[k] - 1, i_list[k]].transAxes, fontsize=11.2)
-        axes[-j_list[k] - 1, i_list[k]].text(0.5, 0.85, '%s<R/kpc<%s' % (r_range_list[k][0], r_range_list[k][1]), ha='center', va='top',
-                             transform=axes[-j_list[k] - 1, i_list[k]].transAxes, fontsize=11.2)
+    # ---------------- GAUSS-HERMIE POLYNOMIAL FITTING ---------------- 
+    def _gh_fit_and_plot(ax, xgrid, ydata, color, label, do_label):
+        data = np.asarray(ydata)
+        if np.max(data) <= 0:
+            return None
 
-        axes[-j_list[k] - 1, i_list[k]].plot(metal_grid, distri_bin_list[k][:, 0] / np.sum(distri_bin_list[k]), c='deepskyblue',
-                             label=r'[$\alpha$/Fe]=0.0 (PPXF)')
-        axes[-j_list[k] - 1, i_list[k]].plot(metal_grid, distri_bin_list[k][:, 1] / np.sum(distri_bin_list[k]), c='tomato',
-                             label=r'[$\alpha$/Fe]=0.4 (PPXF)')
-        axes[-j_list[k] - 1, i_list[k]].plot(metal_grid_true, distri_bin_true_list[k][:, 0] / np.sum(distri_bin_true_list[k]), ':',
-                             c='deepskyblue', label=r'[$\alpha$/Fe]=0.0 (True)')
-        axes[-j_list[k] - 1, i_list[k]].plot(metal_grid_true, distri_bin_true_list[k][:, 1] / np.sum(distri_bin_true_list[k]), ':',
-                             c='tomato', label=r'[$\alpha$/Fe]=0.4 (True)')
-        axes[-j_list[k] - 1, i_list[k]].set_xlim(-1,0.5)
-        axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.5)
-        if len(distri_bin_list[k][:, 0]) == len(distri_bin_true_list[k][:, 0]):
-            axes[-j_list[k] - 1, i_list[k]].text(1, 0.30, "Corr=%.3f" % pearsonr(distri_bin_list[k][:, 0] / np.sum(distri_bin_list[k]),
-                                                                    distri_bin_true_list[k][:, 0] / np.sum(distri_bin_true_list[k]))[0],
-                                 ha='right', va='bottom', transform=axes[-j_list[k] - 1, i_list[k]].transAxes, c='deepskyblue', fontsize=11)
-            axes[-j_list[k] - 1, i_list[k]].text(1, 0.18, "Corr=%.3f" % pearsonr(distri_bin_list[k][:, 1] / np.sum(distri_bin_list[k]),
-                                                                    distri_bin_true_list[k][:, 1] / np.sum(distri_bin_true_list[k]))[0],
-                                 ha='right', va='bottom', transform=axes[-j_list[k] - 1, i_list[k]].transAxes, c='tomato', fontsize=11)
+        mask = data > (0.01 * np.max(data))
+        x = xgrid[mask]
+        y = data[mask]
+        if len(x) <= 5:
+            return None
 
+        mu0 = np.average(x, weights=y)
+        sigma0 = np.sqrt(np.average((x - mu0) ** 2, weights=y))
+        A0 = np.max(y)
+
+        p0 = [A0, mu0, sigma0, 0.0, 0.0]
+        bounds = ([0.0, -2.0, 0.01, -0.7, -0.5],
+                  [1.5,  1.0, 1.00,  0.7,  0.5])
+
+        popt, _ = curve_fit(
+            gauss_hermite, x, y, p0=p0,
+            bounds=bounds, maxfev=20000
+        )
+
+        fit_y = gauss_hermite(xgrid, *popt)
+        ax.plot(
+            xgrid, fit_y, '--', lw=2.0,
+            color=color, alpha=0.9,
+            label=label if do_label else None
+        )
+
+        _, mu, sigma, h3, h4 = popt
+        return (mu, sigma, h3, h4)
+
+
+    # ---------------- LOOP OVER TRIMMED GRIDS ---------------- 
+    for j in range(nz):
+        z0 = zbin[j]
+        z1 = zbin[j + 1]
+
+        for col, (r0, r1) in enumerate(target_rbins):
+            ax = axes[-j - 1, col]
+            ax.tick_params(direction="in")
+
+            # Hide x tick labels except bottom row (same logic as before)
+            if j != 0:
+                ax.xaxis.set_ticklabels([])
+
+            # If this (z,r) combo doesn’t exist, just blank the panel
+            key = (z0, z1, r0, r1)
+            if key not in bin_map:
+                ax.set_axis_off()
+                continue
+
+            k = bin_map[key]
+
+    # ---------------- PANEL LABELS ---------------- 
+            ax.text(
+                0.5, title_y_z,
+                rf'$\mathbf{{{z0}<|z|/\mathrm{{kpc}}<{z1}}}$',
+                ha='center', va='top',
+                transform=ax.transAxes,
+                fontsize=panel_fs, fontweight='bold'
+            )
+
+            ax.text(
+                0.5, title_y_r,
+                rf'$\mathbf{{{r0}<R_{{\rm proj}}/\mathrm{{kpc}}<{r1}}}$',
+                ha='center', va='top',
+                transform=ax.transAxes,
+                fontsize=panel_fs, fontweight='bold'
+            )
+
+    # ---------------- MDFs FOR ONLY α = 0.0 ---------------- 
+            data_blue = np.asarray(distri_bin_list[k][:, 0], dtype=float)
+            true_blue = np.asarray(distri_bin_true_list[k][:, 0], dtype=float)
+
+            # Normalize each curve by its own sum (as requested)
+            s_data = np.sum(data_blue)
+            s_true = np.sum(true_blue)
+            if s_data <= 0 or s_true <= 0:
+                ax.set_axis_off()
+                continue
+
+            data_blue /= s_data
+            true_blue /= s_true
+
+            # Plot MDFs (same limits/line styles)
+            ax.plot(
+                metal_grid, data_blue,
+                color=blue, lw=1.8,
+                label='[α/Fe]=0.0 (pPXF)' if (j == 0 and col == 0) else None
+            )
+            ax.plot(
+                metal_grid_true, true_blue,
+                color=blue, lw=1.4, ls=':',
+                label='[α/Fe]=0.0 (True)' if (j == 0 and col == 0) else None
+            )
+
+            ax.set_xlim(-1, 0.5)
+            ax.set_ylim(0, 0.7)
+
+
+    # ---------------- GH FIT MOMENTS ---------------- 
+            do_leg = (j == 0 and col == 0)
+            try:
+                blue_mom = _gh_fit_and_plot(
+                    ax, metal_grid, data_blue, blue,
+                    r'GH fit ($\alpha$=0.0)', do_leg
+                )
+            except Exception:
+                blue_mom = None
+
+            # Moment annotations 
+            txt_y0 = 0.74
+            dy = moment_dy
+            x_blue = 0.97
+
+            if blue_mom is not None:
+                mu, sigma, h3, h4 = blue_mom
+                blue_lines = [
+                    rf'$\mu={mu:+.3f}$',
+                    rf'$\sigma={sigma:.3f}$',
+                    rf'$h_3={h3:+.3f}$',
+                    rf'$h_4={h4:+.3f}$',
+                ]
+                for jj, t in enumerate(blue_lines):
+                    ax.text(
+                        x_blue, txt_y0 - jj * dy, t,
+                        transform=ax.transAxes,
+                        ha='right', va='top',
+                        fontsize=moment_fs,
+                        fontweight='bold',
+                        color=blue
+                    )
+
+    # ---------------- GLOBAL FORMATTING ---------------- 
     fig.add_subplot(111, frame_on=False)
     plt.tick_params(labelcolor="none", bottom=False, left=False)
-    plt.xlabel('[M/H]', fontsize=15)
-    plt.ylabel(fraction_type, fontsize=15)
 
-    fig.subplots_adjust(left=0.042, right=0.995, top=0.92, bottom=0.09, hspace=0.1, wspace=0.0)
-    axes[0, 0].legend(bbox_to_anchor=(0, 1.02, 1, 0.102), loc='lower left', ncol=4, fontsize=12)
+    plt.xlabel('[M/H]', fontsize=17, fontweight='bold', labelpad=22)
+    plt.ylabel(fraction_type, fontsize=17, fontweight='bold', labelpad=22)
 
-    return fig
+    # Slightly more headroom now that we have title + legend
+    fig.subplots_adjust(
+        left=0.085, right=0.995,
+        top=0.88, bottom=0.12,
+        hspace=0.14, wspace=0.18
+    )
 
+    for ax in axes.flatten():
+        if not ax.axison:
+            continue
+
+        ax.tick_params(axis='both', which='major',
+                       labelsize=13, width=1.6, length=6)
+
+        for tick in ax.get_xticklabels():
+            tick.set_fontweight('bold')
+        for tick in ax.get_yticklabels():
+            tick.set_fontweight('bold')
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.4)
+
+    # ---------------- LEGEND ---------------- 
+    from matplotlib.lines import Line2D
+
+    legend_handles = [
+        Line2D([0], [0], color=blue, lw=1.8, ls='-',
+               label=r'[$\alpha$/Fe]=0.0 (pPXF)'),
+        Line2D([0], [0], color=blue, lw=1.4, ls=':',
+               label=r'[$\alpha$/Fe]=0.0 (True)'),
+        Line2D([0], [0], color=blue, lw=2.0, ls='--',
+               label=r'GH fit ($\alpha$=0.0)')
+    ]
+
+    # Title (top) + Legend (just below)
+    fig.suptitle(
+        '# Migration Efficiency MDFs',
+        fontsize=18,
+        fontweight='bold',
+        y=0.99
+    )
+
+    leg = fig.legend(
+        handles=legend_handles,
+        loc='upper left',
+        ncol=3,
+        fontsize=12,
+        frameon=True,
+        bbox_to_anchor=(0.06, 0.955)
+    )
+
+    for t in leg.get_texts():
+        t.set_fontweight('bold')
+
+    return fig, fit_results
+
+# ----------------------------------------------------------------------------------------------------------------
 def plot_mh_alpha_rz_hist_mode(weights_values, weights_true_values, rbin, zbin, d, reg_dim, reg_dim_true, results_table,
                           metal_grid, metal_grid_true, alpha_grid, alpha_grid_true, fraction_type='mass fraction', mode='metal'):
 
@@ -483,8 +703,8 @@ def plot_mh_alpha_rz_hist_mode(weights_values, weights_true_values, rbin, zbin, 
                                  label=r'PPXF')
             axes[-j_list[k] - 1, i_list[k]].plot(metal_grid_true, np.sum(distri_bin_true_list[k], axis=1) / np.sum(distri_bin_true_list[k]), ls='dashed',
                                  c='black', label=r'True')
-            axes[-j_list[k] - 1, i_list[k]].set_xlim(-1,0.6)
-            axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.5)
+            axes[-j_list[k] - 1, i_list[k]].set_xlim(-1,0.5)
+            axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.7)
             if len(np.sum(distri_bin_list[k], axis=1)) == len(np.sum(distri_bin_true_list[k], axis=1)):
                 axes[-j_list[k] - 1, i_list[k]].text(0.02, 0.30, "Corr=%.3f" % pearsonr(np.sum(distri_bin_list[k], axis=1) / np.sum(distri_bin_list[k]),
                                                                         np.sum(distri_bin_true_list[k], axis=1) / np.sum(distri_bin_true_list[k]))[0],
@@ -494,8 +714,8 @@ def plot_mh_alpha_rz_hist_mode(weights_values, weights_true_values, rbin, zbin, 
                                  label=r'PPXF')
             axes[-j_list[k] - 1, i_list[k]].plot(alpha_grid_true, np.sum(distri_bin_true_list[k], axis=0) / np.sum(distri_bin_true_list[k]), ls='dashed',
                                  c='black', label=r'True')
-            axes[-j_list[k] - 1, i_list[k]].set_xlim(-0.2,0.6)
-            axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.5)
+            axes[-j_list[k] - 1, i_list[k]].set_xlim(-1,0.6)
+            axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.69)
             if len(np.sum(distri_bin_list[k], axis=0)) == len(np.sum(distri_bin_true_list[k], axis=0)):
                 axes[-j_list[k] - 1, i_list[k]].text(0.98, 0.30, "Corr=%.3f" % pearsonr(np.sum(distri_bin_list[k], axis=0) / np.sum(distri_bin_list[k]),
                                                                         np.sum(distri_bin_true_list[k], axis=0) / np.sum(distri_bin_true_list[k]))[0],
@@ -507,11 +727,12 @@ def plot_mh_alpha_rz_hist_mode(weights_values, weights_true_values, rbin, zbin, 
     plt.xlabel(xlabel, fontsize=15)
     plt.ylabel(fraction_type, fontsize=15)
 
-    fig.subplots_adjust(left=0.042, right=0.995, top=0.92, bottom=0.09, hspace=0.1, wspace=0.0)
-    axes[0, 0].legend(bbox_to_anchor=(0, 1.02, 1, 0.102), loc='lower left', ncol=4, fontsize=12)
-
+    fig.subplots_adjust(left=0.05, right=0.995, top=0.96, bottom=0.12, hspace=0.1, wspace=0.0)
+    axes[0, 0].legend(bbox_to_anchor=(0, 1.06, 1, 0.102), loc='lower left', ncol=4, fontsize=11)
+    
     return fig
 
+# ----------------------------------------------------------------------------------------------------------------
 def plot_mh_alpha_rz(weights_values, rbin, zbin, d, results_table, reg_dim, metal_grid, alpha_grid):
     x = metal_grid  # Grid centers
     y = alpha_grid
@@ -530,6 +751,8 @@ def plot_mh_alpha_rz(weights_values, rbin, zbin, d, results_table, reg_dim, meta
     for k in range(len(distri_bin_list)):
         pc = axes[-j_list[k]-1, i_list[k]].pcolormesh(xb, yb, distri_bin_list[k].T / grid_area_2d, edgecolors='face', cmap='Oranges')
         axes[-j_list[k]-1, i_list[k]].tick_params(direction="in")
+        axes[-j_list[k] - 1, i_list[k]].set_xlim(-1,0.5)
+        axes[-j_list[k] - 1, i_list[k]].set_ylim(0,0.7)
         if -j_list[k]-1 != -1:
             axes[-j_list[k]-1, i_list[k]].xaxis.set_ticklabels([])
         if i_list[k] != 0:
@@ -559,15 +782,14 @@ def plot_mh_alpha_rz(weights_values, rbin, zbin, d, results_table, reg_dim, meta
     fig.subplots_adjust(wspace=0)
     return fig
 
-
-
+# ----------------------------------------------------------------------------------------------------------------
 def mask_mass_arrays(mass_array, mask_age, mask_metal, mask_alpha):
     mass_array = mass_array[mask_age, :, :]
     mass_array = mass_array[:, mask_metal, :]
     mass_array = mass_array[:, :, mask_alpha]
     return mass_array
 
-
+# ----------------------------------------------------------------------------------------------------------------
 def load_mass_fractions(cube_gist_path, cube_gist_run):
     cube_gist_run_path = cube_gist_path + cube_gist_run + '/'
     filename = cube_gist_run_path + cube_gist_run
@@ -996,6 +1218,7 @@ def load_mass_fractions(cube_gist_path, cube_gist_run):
            metal, metal_nuclear, metal_bulge, metal_thin, metal_thick, \
            metal_true, metal_nuclear_true, metal_bulge_true, metal_thin_true, metal_thick_true
 
+# ----------------------------------------------------------------------------------------------------------------
 def load_mass_fraction_single(cube_gist_path, cube_gist_run, truevalue):
     cube_gist_run_path = cube_gist_path + cube_gist_run + '/'
     filename = cube_gist_run_path + cube_gist_run
@@ -1177,6 +1400,8 @@ def load_mass_fraction_single(cube_gist_path, cube_gist_run, truevalue):
            metal, metal_nuclear, metal_bulge, metal_thin, metal_thick
 
 
+
+# ----------------------------------------------------------------------------------------------------------------
 def plot_weights_2d_cases(weights_list, age_grid_list, metal_grid_list, label_list, title_list,
                           vmin, vmax, axes_pad=(0.35, 0.3), cbar_mode='single', cbar_location='top', cbar_pad=0.3,
                           log_age=False, cb_label=r'light fraction ($\rm Gyr^{-1} dex^{-1}$)', **kwargs):
@@ -1226,6 +1451,7 @@ def plot_weights_2d_cases(weights_list, age_grid_list, metal_grid_list, label_li
 
     return fig
 
+# ----------------------------------------------------------------------------------------------------------------
 def plot_weights_1d_cases(weights_list, age_grid_list, metal_grid_list, age_gridsize_list, metal_gridsize_list, age_gridborder_list, metal_gridborder_list,
                           plot_type_list, perbinsize_list, logmass_list, show_corr_list, color_list, label_list, text_list, direction, fraction_type, **kwargs):
     npanels = len(weights_list[0])
