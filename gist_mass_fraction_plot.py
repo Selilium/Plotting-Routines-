@@ -421,27 +421,27 @@ def cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim):
             j_list.append(j)
     return r_range_list, z_range_list, distri_bin_list, i_list, j_list
 
-#-----------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------
 def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                           reg_dim, reg_dim_true, results_table,
                           metal_grid, metal_grid_true,
                           fraction_type='mass fraction'):
 
-
     """
-	MDF PANEL PLOTTING MODIFICATIONS: 
-		Trimming: 
-			The MDF panels have been trimmed to showcase Radius_Projected bins for 5<Rproj/kpc<11
-			The |z| bins remain untouched 
-		Blue Curve: 
-			Displaying only the alpha slice of [α/Fe]=0.0  (index 0) in blue. 
-		Normalization:
-			Each BLUE curve normalized by its own total (sum over [M/H] bins), so each MDF integrates to 1 within that (R_proj,|z|) bin.
+    MDF PANEL PLOTTING MODIFICATIONS:
+        UNTRIMMED:
+            Showcasing all Radius_Projected bins provided by rbin
+            |z| bins remain untouched
+        Blue Curve:
+            Displaying only the alpha slice of [α/Fe]=0.0  (index 0) in blue.
+        Normalization:
+            Each BLUE curve normalized by its own total (sum over [M/H] bins),
+            so each MDF integrates to 1 within that (R_proj,|z|) bin.
     """
 
     blue = 'deepskyblue'
 
-    # ---------------- TUNABLE TEXT SIZES ---------------- 
+    # ---------------- TUNABLE TEXT SIZES ----------------
     panel_fs = 12          # z/R panel labels
     moment_fs = 11         # moment text size
     moment_dy = 0.070      # vertical spacing between moment lines
@@ -450,15 +450,17 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
     fit_results = []
 
-    # ---------------- TRIMMED RADIUS BINS ---------------- 
-    target_rbins = [(5, 7), (7, 9), (9, 11)]
-
-    # Trimmed figure set-up: n_z x 3 grid
+    # ---------------- UNTRIMMED GRID SETUP ----------------
     nz = len(zbin) - 1
-    nr = 3
+    nr = len(rbin) - 1
 
+    fig, axes = plt.subplots(
+        nz, nr,
+        figsize=(3.1 * nr, 2.9 * nz),
+        sharey=True
+    )
 
-    # Bin distributions
+    # ---------------- BIN DISTRIBUTIONS ----------------
     r_range_list, z_range_list, distri_bin_list, i_list, j_list = cal_rz_distri_bin(
         rbin, zbin, d, results_table, weights_values, reg_dim
     )
@@ -466,15 +468,14 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
         rbin, zbin, d, results_table, weights_true_values, reg_dim_true
     )
 
-    # Mapping each bin to its k index
+    # ---------------- MAP EACH BIN TO ITS k INDEX ----------------
     bin_map = {}
     for k in range(len(distri_bin_list)):
         r0, r1 = r_range_list[k]
         z0, z1 = z_range_list[k]
-        if (r0, r1) in target_rbins:
-            bin_map[(z0, z1, r0, r1)] = k
+        bin_map[(z0, z1, r0, r1)] = k
 
-    # ---------------- GAUSS-HERMIE POLYNOMIAL FITTING ---------------- 
+    # ---------------- GAUSS-HERMITE POLYNOMIAL FITTING ----------------
     def _gh_fit_and_plot(ax, xgrid, ydata, color, label, do_label):
         data = np.asarray(ydata)
         if np.max(data) <= 0:
@@ -509,21 +510,23 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
         _, mu, sigma, h3, h4 = popt
         return (mu, sigma, h3, h4)
 
-
-    # ---------------- LOOP OVER TRIMMED GRIDS ---------------- 
+    # ---------------- LOOP OVER UNTRIMMED GRID ----------------
     for j in range(nz):
         z0 = zbin[j]
         z1 = zbin[j + 1]
 
-        for col, (r0, r1) in enumerate(target_rbins):
+        for col in range(nr):
+            r0 = rbin[col]
+            r1 = rbin[col + 1]
+
             ax = axes[-j - 1, col]
             ax.tick_params(direction="in")
 
-            # Hide x tick labels except bottom row (same logic as before)
+            # Hide x tick labels except bottom row
             if j != 0:
                 ax.xaxis.set_ticklabels([])
 
-            # If this (z,r) combo doesn’t exist, just blank the panel
+            # If this (z,r) combo doesn’t exist, blank the panel
             key = (z0, z1, r0, r1)
             if key not in bin_map:
                 ax.set_axis_off()
@@ -531,7 +534,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
             k = bin_map[key]
 
-    # ---------------- PANEL LABELS ---------------- 
+            # ---------------- PANEL LABELS ----------------
             ax.text(
                 0.5, title_y_z,
                 rf'$\mathbf{{{z0}<|z|/\mathrm{{kpc}}<{z1}}}$',
@@ -548,11 +551,11 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                 fontsize=panel_fs, fontweight='bold'
             )
 
-    # ---------------- MDFs FOR ONLY α = 0.0 ---------------- 
+            # ---------------- MDFs FOR ONLY α = 0.0 ----------------
             data_blue = np.asarray(distri_bin_list[k][:, 0], dtype=float)
             true_blue = np.asarray(distri_bin_true_list[k][:, 0], dtype=float)
 
-            # Normalize each curve by its own sum (as requested)
+            # Normalize each curve by its own sum
             s_data = np.sum(data_blue)
             s_true = np.sum(true_blue)
             if s_data <= 0 or s_true <= 0:
@@ -562,7 +565,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
             data_blue /= s_data
             true_blue /= s_true
 
-            # Plot MDFs (same limits/line styles)
+            # Plot MDFs
             ax.plot(
                 metal_grid, data_blue,
                 color=blue, lw=1.8,
@@ -577,8 +580,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
             ax.set_xlim(-1, 0.5)
             ax.set_ylim(0, 0.7)
 
-
-    # ---------------- GH FIT MOMENTS ---------------- 
+            # ---------------- GH FIT + MOMENTS ----------------
             do_leg = (j == 0 and col == 0)
             try:
                 blue_mom = _gh_fit_and_plot(
@@ -588,7 +590,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
             except Exception:
                 blue_mom = None
 
-            # Moment annotations 
+            # Moment annotations
             txt_y0 = 0.74
             dy = moment_dy
             x_blue = 0.97
@@ -611,14 +613,13 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                         color=blue
                     )
 
-    # ---------------- GLOBAL FORMATTING ---------------- 
+    # ---------------- GLOBAL FORMATTING ----------------
     fig.add_subplot(111, frame_on=False)
     plt.tick_params(labelcolor="none", bottom=False, left=False)
 
     plt.xlabel('[M/H]', fontsize=17, fontweight='bold', labelpad=22)
     plt.ylabel(fraction_type, fontsize=17, fontweight='bold', labelpad=22)
 
-    # Slightly more headroom now that we have title + legend
     fig.subplots_adjust(
         left=0.085, right=0.995,
         top=0.88, bottom=0.12,
@@ -640,7 +641,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
         for spine in ax.spines.values():
             spine.set_linewidth(1.4)
 
-    # ---------------- LEGEND ---------------- 
+    # ---------------- LEGEND ACROSS TOP (BLUE ONLY) ----------------
     from matplotlib.lines import Line2D
 
     legend_handles = [
@@ -652,9 +653,8 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                label=r'GH fit ($\alpha$=0.0)')
     ]
 
-    # Title (top) + Legend (just below)
     fig.suptitle(
-        '# Migration Efficiency MDFs',
+        '200% Migration Efficiency MDFs',
         fontsize=18,
         fontweight='bold',
         y=0.99
