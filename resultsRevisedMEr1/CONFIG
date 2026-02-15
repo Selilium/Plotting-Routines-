@@ -1,0 +1,109 @@
+GENERAL:
+  RUN_ID: resultsRevisedMEr1
+  INPUT: /scratch/general/nfs1/u6053553/ada/mwdatacube/hpc_output/gist_results/NGC5746_linear_losvd_nonoise_muse_noyoungest_L0x1_true_n1e8p/final_cube_muse_error.fits
+  OUTPUT: /scratch/general/nfs1/u6053553/ada/mwdatacube/hpc_output/gist_results/NGC5746_linear_losvd_nonoise_muse_noyoungest_L0x1_true_n1e8p/gist/./resultsRevisedMEr1
+  REDSHIFT: 0.0
+  PARALLEL: true
+  NCPU: !!python/object/apply:numpy.core.multiarray.scalar
+  - !!python/object/apply:numpy.dtype
+    args:
+    - i8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    IAAAAAAAAAA=
+  LSF_DATA: lsf_MUSE-WFM-GIST
+  LSF_TEMP: lsf_MILES
+  OW_CONFIG: true
+  OW_OUTPUT: false
+  CONFIG_DIR: /scratch/general/nfs1/u6053553/ada/mwdatacube/hpc_output/gist_results/NGC5746_linear_losvd_nonoise_muse_noyoungest_L0x1_true_n1e8p/gist/
+  TEMPLATE_DIR: /scratch/general/nfs1/u6053553/ada/mwdatacube/
+READ_DATA:
+  METHOD: MUSE_WFM
+  DEBUG: false
+  ORIGIN: 66.5,48.5
+  LMIN_TOT: 4650
+  LMAX_TOT: 6800
+  LMIN_SNR: 4750.1
+  LMAX_SNR: 6800
+SPATIAL_MASKING:
+  METHOD: default
+  MIN_SNR: 0
+  MASK: false
+SPATIAL_BINNING:
+  METHOD: voronoi
+  TARGET_SNR: 80.0
+  COVARIANCE: 0.0
+PREPARE_SPECTRA:
+  METHOD: default
+  VELSCALE: 61.636
+PREPARE_TEMPLATES:
+  METHOD: miles_oversampling
+  LIBRARY: miles/MILES_BASTI_KU_Ep*/
+  NORM_TEMP: MASS
+  FACTOR: 10
+  AGE_RANGE: 0.24,14.1
+  METAL_RANGE: null
+KIN:
+  METHOD: ppxf
+  SPEC_MASK: specMask_KIN_good
+  LMIN: 4700.1
+  LMAX: 6550
+  SIGMA: 50
+  MOM: 4
+  ADEG: -1
+  MDEG: 0
+  REDDENING: null
+  MC_PPXF: 0
+  VEL_RATI: 1
+  BIAS: null
+GAS:
+  METHOD: false
+  LEVEL: BIN
+  LMIN: 4750.1
+  LMAX: 6500
+  ERRORS: 0
+  REDDENING: 0.1,0.1
+  EBmV: null
+  EMI_FILE: emissionLines.config
+SFH:
+  METHOD: ppxf
+  LMIN: 4700.1
+  LMAX: 6550
+  LSF_SFH: null
+  SPEC_MASK: specMask_SFH_good
+  MOM: 4
+  MDEG: 0
+  REDDENING: null
+  REGUL_ERR: 1.0
+  REG_STEP: false
+  REGSTEP_AGE: null
+  NOISE: 1
+  FIXED: true
+  REG_ORD: 1
+  VEL_RATI: 1
+  GET_RMAX: false
+  RMAX_THRES: 500
+  MC_PPXF: 0
+  MC_SPEC: bestfit
+  MC_NOISE: residual
+  MC_MODE: wild_bootstrap
+LS:
+  METHOD: default
+  TYPE: SPP
+  LS_FILE: lsBands.config
+  CONV_COR: 8.4
+  SPP_FILE: miles/MILES_KU_LIS8.4.fits
+  SPEC_MASK: specMask_LS_good
+  MC_LS: 15
+  NWALKER: 100
+  NCHAIN: 1000
