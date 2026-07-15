@@ -421,7 +421,7 @@ def cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim):
             j_list.append(j)
     return r_range_list, z_range_list, distri_bin_list, i_list, j_list
 
-# -----------------------------------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------------------------------------
 def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                           reg_dim, reg_dim_true, results_table,
                           metal_grid, metal_grid_true,
@@ -429,9 +429,6 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
     """
     MDF PANEL PLOTTING MODIFICATIONS:
-        UNTRIMMED:
-            Showcasing all Radius_Projected bins provided by rbin
-            |z| bins remain untouched
         Blue Curve:
             Displaying only the alpha slice of [α/Fe]=0.0  (index 0) in blue.
         Normalization:
@@ -477,37 +474,103 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
     # ---------------- GAUSS-HERMITE POLYNOMIAL FITTING ----------------
     def _gh_fit_and_plot(ax, xgrid, ydata, color, label, do_label):
-        data = np.asarray(ydata)
-        if np.max(data) <= 0:
+
+        from scipy.ndimage import gaussian_filter1d
+
+        data = np.asarray(ydata, dtype=float)
+
+        # --------------------------------------------------
+        # basic sanity checks
+        # --------------------------------------------------
+
+        if np.sum(np.isfinite(data)) < 5:
             return None
 
-        mask = data > (0.01 * np.max(data))
-        x = xgrid[mask]
-        y = data[mask]
-        if len(x) <= 5:
+        if np.nanmax(data) <= 0:
             return None
+
+        # --------------------------------------------------
+        # smooth MDF slightly to suppress noise spikes
+        # --------------------------------------------------
+
+        data_smooth = gaussian_filter1d(data, sigma=1.0)
+
+        # --------------------------------------------------
+        # normalize
+        # --------------------------------------------------
+
+        data_smooth = data_smooth / np.nansum(data_smooth)
+
+        # --------------------------------------------------
+        # stronger masking threshold
+        # removes weak noisy tails
+        # --------------------------------------------------
+
+        mask = data_smooth > (0.08 * np.nanmax(data_smooth))
+
+        x = xgrid[mask]
+        y = data_smooth[mask]
+
+        if len(x) < 6:
+            return None
+
+        # --------------------------------------------------
+        # initial guesses
+        # --------------------------------------------------
 
         mu0 = np.average(x, weights=y)
-        sigma0 = np.sqrt(np.average((x - mu0) ** 2, weights=y))
-        A0 = np.max(y)
 
-        p0 = [A0, mu0, sigma0, 0.0, 0.0]
-        bounds = ([0.0, -2.0, 0.01, -0.7, -0.5],
-                  [1.5,  1.0, 1.00,  0.7,  0.5])
-
-        popt, _ = curve_fit(
-            gauss_hermite, x, y, p0=p0,
-            bounds=bounds, maxfev=20000
+        sigma0 = np.sqrt(
+            np.average((x - mu0)**2, weights=y)
         )
 
+        A0 = np.nanmax(y)
+
+        # --------------------------------------------------
+        # tighter physically reasonable bounds
+        # --------------------------------------------------
+
+        p0 = [A0, mu0, sigma0, 0.0, 0.0]
+
+        bounds = (
+            [0.0, -1.5, 0.05, -0.25, -0.25],
+            [1.5,  0.7,  0.60,  0.25,  0.25]
+        )
+
+        try:
+
+            popt, _ = curve_fit(
+                gauss_hermite,
+                x,
+                y,
+                p0=p0,
+                bounds=bounds,
+                maxfev=30000
+            )
+
+        except:
+            return None
+
         fit_y = gauss_hermite(xgrid, *popt)
+
+        # --------------------------------------------------
+        # renormalize fit
+        # --------------------------------------------------
+
+        fit_y = fit_y / np.nansum(fit_y)
+
         ax.plot(
-            xgrid, fit_y, '--', lw=2.0,
-            color=color, alpha=0.9,
+            xgrid,
+            fit_y,
+            '--',
+            lw=2.4,
+            color=color,
+            alpha=0.95,
             label=label if do_label else None
         )
 
         _, mu, sigma, h3, h4 = popt
+
         return (mu, sigma, h3, h4)
 
     # ---------------- LOOP OVER UNTRIMMED GRID ----------------
@@ -545,7 +608,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
             ax.text(
                 0.5, title_y_r,
-                rf'$\mathbf{{{r0}<R_{{\rm proj}}/\mathrm{{kpc}}<{r1}}}$',
+                rf'$\mathbf{{{r0}<R_{{\rm}}/\mathrm{{kpc}}<{r1}}}$',
                 ha='center', va='top',
                 transform=ax.transAxes,
                 fontsize=panel_fs, fontweight='bold'
@@ -654,7 +717,7 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
     ]
 
     fig.suptitle(
-        '200% Migration Efficiency MDFs',
+        '10% Migration Efficiency Face-On MDFs',
         fontsize=18,
         fontweight='bold',
         y=0.99
