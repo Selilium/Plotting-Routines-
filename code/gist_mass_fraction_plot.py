@@ -21,16 +21,33 @@ from scipy.optimize import curve_fit
 from scipy.special import hermite
 
 
-# -----GAUSS-HERMITE---------------------------------------------------------------------------------------------
+# ----- GAUSS-HERMITE MODEL -----------------------------------------------------------------------
 def gauss_hermite(x, A, mu, sigma, h3, h4):
     """
-    Gauss-Hermite series expansion:
-    A * exp(-(x-mu)^2/(2*sigma^2)) * [1 + h3*H3((x-mu)/sigma) + h4*H4((x-mu)/sigma)]
+    Fourth-order Gauss-Hermite parameterization of an MDF.
+
+    Parameters
+    ----------
+    x : array-like
+        Metallicity [M/H].
+    A : float
+        Amplitude of the base Gaussian.
+    mu : float
+        Center of the base Gaussian.
+    sigma : float
+        Width of the base Gaussian.
+    h3 : float
+        Asymmetric Gauss-Hermite coefficient.
+    h4 : float
+        Symmetric peak/wing Gauss-Hermite coefficient.
     """
-    x_std = (x - mu) / sigma
-    H3 = (2*np.sqrt(2)*x_std**3 - 3*np.sqrt(2)*x_std) / np.sqrt(6)
-    H4 = (4*x_std**4 - 12*x_std**2 + 3) / np.sqrt(24)
-    return A * np.exp(-0.5 * x_std**2) * (1 + h3*H3 + h4*H4)
+    x = np.asarray(x, dtype=float)
+    w = (x - mu) / sigma
+
+    H3 = (2.0 * w**3 - 3.0 * w) / np.sqrt(3.0)
+    H4 = (4.0 * w**4 - 12.0 * w**2 + 3.0) / np.sqrt(24.0)
+
+    return A * np.exp(-0.5 * w**2) * (1.0 + h3 * H3 + h4 * H4)
 
 # ----------------------------------------------------------------------------------------------------------------
 def plot_age_metal_grid_2d(distri1, distri2, title1, title2, age_grid_2d, metal_grid_2d, linear_age=False, threshold=0, **kwargs):
@@ -425,155 +442,505 @@ def cal_rz_distri_bin(rbin, zbin, d, results_table, weights_values, reg_dim):
 def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
                           reg_dim, reg_dim_true, results_table,
                           metal_grid, metal_grid_true,
-                          fraction_type='mass fraction'):
+                          fraction_type='mass fraction',
+                          figure_title='100% Migration Efficiency MDFs'):
 
     """
-    MDF PANEL PLOTTING MODIFICATIONS:
-        Blue Curve:
-            Displaying only the alpha slice of [α/Fe]=0.0  (index 0) in blue.
-        Normalization:
-            Each BLUE curve normalized by its own total (sum over [M/H] bins),
-            so each MDF integrates to 1 within that (R_proj,|z|) bin.
+    Plot pPXF-recovered and true/input MDFs in projected R-|z| bins.
+
+    For each spatial bin:
+        - dark-blue solid line: pPXF-recovered MDF
+        - dark-blue dashed line: Gauss-Hermite fit to pPXF MDF
+        - orange solid line: true/input MDF
+        - orange dashed line: Gauss-Hermite fit to true/input MDF
+
+    Only the [alpha/Fe] = 0.0 slice (index 0) is displayed.
+    Each MDF is independently normalized so that its metallicity-bin
+    mass fractions sum to one within the spatial bin.
     """
 
-    blue = 'deepskyblue'
+    # ---------------- COLORS ----------------
+    true_color = '#1f5a94' # Blue 
+    ppxf_color = '#e67e22' # Orange
+    constrained_color = '#7b2cbf' # Purple 
 
     # ---------------- TUNABLE TEXT SIZES ----------------
-    panel_fs = 12          # z/R panel labels
-    moment_fs = 11         # moment text size
-    moment_dy = 0.070      # vertical spacing between moment lines
-    title_y_z = 0.965      # z label vertical position
-    title_y_r = 0.875      # R label vertical position
+    panel_fs = 12
+    moment_fs = 7.5
+    moment_dy = 0.055
+    title_y_z = 0.975
+    title_y_r = 0.895
 
     fit_results = []
 
-    # ---------------- UNTRIMMED GRID SETUP ----------------
+    # ---------------- GRID SETUP ----------------
     nz = len(zbin) - 1
     nr = len(rbin) - 1
 
     fig, axes = plt.subplots(
-        nz, nr,
+        nz,
+        nr,
         figsize=(3.1 * nr, 2.9 * nz),
-        sharey=True
+        sharey=True,
+        squeeze=False
     )
 
     # ---------------- BIN DISTRIBUTIONS ----------------
     r_range_list, z_range_list, distri_bin_list, i_list, j_list = cal_rz_distri_bin(
-        rbin, zbin, d, results_table, weights_values, reg_dim
-    )
-    _, _, distri_bin_true_list, _, _ = cal_rz_distri_bin(
-        rbin, zbin, d, results_table, weights_true_values, reg_dim_true
+        rbin,
+        zbin,
+        d,
+        results_table,
+        weights_values,
+        reg_dim
     )
 
-    # ---------------- MAP EACH BIN TO ITS k INDEX ----------------
+    _, _, distri_bin_true_list, _, _ = cal_rz_distri_bin(
+        rbin,
+        zbin,
+        d,
+        results_table,
+        weights_true_values,
+        reg_dim_true
+    )
+
+    # ---------------- MAP EACH SPATIAL BIN TO ITS INDEX ----------------
     bin_map = {}
+
     for k in range(len(distri_bin_list)):
         r0, r1 = r_range_list[k]
         z0, z1 = z_range_list[k]
         bin_map[(z0, z1, r0, r1)] = k
 
-    # ---------------- GAUSS-HERMITE POLYNOMIAL FITTING ----------------
+    # ---------------- GAUSS-HERMITE FITTING ----------------
     def _gh_fit_and_plot(ax, xgrid, ydata, color, label, do_label):
+        """
+        Fit the same Gauss-Hermite model independently to one MDF.
 
-        from scipy.ndimage import gaussian_filter1d
+        Important fitting choices:
+            - no smoothing;
+            - no peak-based threshold;
+            - all finite, non-negative MDF bins are retained;
+            - the fitted curve is not renormalized after optimization;
+            - starting mu and sigma adapt automatically to each MDF;
+            - multiple h3/h4 starting points are tested;
+            - the same bounds and fitting method are used in every bin.
+        """
 
+        xgrid = np.asarray(xgrid, dtype=float)
         data = np.asarray(ydata, dtype=float)
 
-        # --------------------------------------------------
-        # basic sanity checks
-        # --------------------------------------------------
+        # Keep only valid metallicity bins.
+        valid = (
+            np.isfinite(xgrid)
+            & np.isfinite(data)
+            & (data >= 0.0)
+        )
 
-        if np.sum(np.isfinite(data)) < 5:
-            return None
-
-        if np.nanmax(data) <= 0:
-            return None
-
-        # --------------------------------------------------
-        # smooth MDF slightly to suppress noise spikes
-        # --------------------------------------------------
-
-        data_smooth = gaussian_filter1d(data, sigma=1.0)
-
-        # --------------------------------------------------
-        # normalize
-        # --------------------------------------------------
-
-        data_smooth = data_smooth / np.nansum(data_smooth)
-
-        # --------------------------------------------------
-        # stronger masking threshold
-        # removes weak noisy tails
-        # --------------------------------------------------
-
-        mask = data_smooth > (0.08 * np.nanmax(data_smooth))
-
-        x = xgrid[mask]
-        y = data_smooth[mask]
+        x = xgrid[valid]
+        y = data[valid]
 
         if len(x) < 6:
-            return None
-
-        # --------------------------------------------------
-        # initial guesses
-        # --------------------------------------------------
-
-        mu0 = np.average(x, weights=y)
-
-        sigma0 = np.sqrt(
-            np.average((x - mu0)**2, weights=y)
-        )
-
-        A0 = np.nanmax(y)
-
-        # --------------------------------------------------
-        # tighter physically reasonable bounds
-        # --------------------------------------------------
-
-        p0 = [A0, mu0, sigma0, 0.0, 0.0]
-
-        bounds = (
-            [0.0, -1.5, 0.05, -0.25, -0.25],
-            [1.5,  0.7,  0.60,  0.25,  0.25]
-        )
-
-        try:
-
-            popt, _ = curve_fit(
-                gauss_hermite,
-                x,
-                y,
-                p0=p0,
-                bounds=bounds,
-                maxfev=30000
+            print(
+                "GH fit skipped: fewer than six valid metallicity bins."
             )
-
-        except:
             return None
 
-        fit_y = gauss_hermite(xgrid, *popt)
+        total = np.sum(y)
 
-        # --------------------------------------------------
-        # renormalize fit
-        # --------------------------------------------------
+        if not np.isfinite(total) or total <= 0.0:
+            print(
+                "GH fit skipped: MDF has a non-positive or invalid total."
+            )
+            return None
 
-        fit_y = fit_y / np.nansum(fit_y)
+        # Normalize the actual MDF used in the fit.
+        y = y / total
+
+        # Automatically adapt the initial center and width to this MDF.
+        mu0 = np.sum(x * y)
+
+        variance0 = np.sum(y * (x - mu0)**2)
+        sigma0 = np.sqrt(max(variance0, 0.05**2))
+
+        sigma0 = np.clip(
+            sigma0,
+            0.06,
+            0.55
+        )
+
+        A0 = np.max(y)
+
+        # Use bounds broad enough for all spatial bins while applying
+        # the same constraints everywhere.
+        lower_bounds = [
+            0.0,
+            np.min(x) - 0.25,
+            0.04,
+            -0.30,
+            -0.30
+        ]
+
+        upper_bounds = [
+            max(2.0, 3.0 * A0),
+            np.max(x) + 0.25,
+            0.75,
+            0.30,
+            0.30
+        ]
+
+        # Multiple starting points reduce sensitivity to a single
+        # local minimum without manually tuning individual spatial bins.
+        h_start_values = [-0.10, 0.0, 0.10]
+
+        best_popt = None
+        best_score = np.inf
+
+        for h3_start in h_start_values:
+            for h4_start in h_start_values:
+
+                p0 = [
+                    A0,
+                    mu0,
+                    sigma0,
+                    h3_start,
+                    h4_start
+                ]
+
+                try:
+                    popt, _ = curve_fit(
+                        gauss_hermite,
+                        x,
+                        y,
+                        p0=p0,
+                        bounds=(lower_bounds, upper_bounds),
+                        maxfev=100000
+                    )
+
+                    model_at_data = gauss_hermite(x, *popt)
+
+                    if not np.all(np.isfinite(model_at_data)):
+                        continue
+
+                    residual_score = np.sum(
+                        (y - model_at_data)**2
+                    )
+
+                    # Penalize substantially negative GH curves because
+                    # an MDF represents a non-negative mass fraction.
+                    dense_test_grid = np.linspace(
+                        np.min(x),
+                        np.max(x),
+                        500
+                    )
+
+                    dense_test_model = gauss_hermite(
+                        dense_test_grid,
+                        *popt
+                    )
+
+                    negative_values = np.minimum(
+                        dense_test_model,
+                        0.0
+                    )
+
+                    negativity_penalty = 100.0 * np.sum(
+                        negative_values**2
+                    )
+
+                    score = residual_score + negativity_penalty
+
+                    if score < best_score:
+                        best_score = score
+                        best_popt = popt
+
+                except (RuntimeError, ValueError, FloatingPointError):
+                    continue
+
+        if best_popt is None:
+            print(
+                "GH fit failed for one MDF after all starting points."
+            )
+            return None
+
+        A, mu, sigma, h3, h4 = best_popt
+
+        # Draw a smooth fitted curve while fitting only the real MDF bins.
+        x_dense = np.linspace(
+            np.min(xgrid),
+            np.max(xgrid),
+            500
+        )
+
+        fit_y_dense = gauss_hermite(
+            x_dense,
+            A,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
 
         ax.plot(
-            xgrid,
-            fit_y,
-            '--',
-            lw=2.4,
+            x_dense,
+            fit_y_dense,
+            linestyle='--',
+            linewidth=2.2,
             color=color,
             alpha=0.95,
-            label=label if do_label else None
+            label=label if do_label else None,
+            zorder=4
         )
 
-        _, mu, sigma, h3, h4 = popt
+        model_at_data = gauss_hermite(
+            x,
+            A,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
 
-        return (mu, sigma, h3, h4)
+        rmse = np.sqrt(
+            np.mean((y - model_at_data)**2)
+        )
 
-    # ---------------- LOOP OVER UNTRIMMED GRID ----------------
+        return {
+            'A': float(A),
+            'mu': float(mu),
+            'sigma': float(sigma),
+            'h3': float(h3),
+            'h4': float(h4),
+            'rmse': float(rmse)
+        }
+
+    def _true_constrained_gh_fit_and_plot(ax, xgrid, ydata, color,
+                                          label, do_label):
+        """
+        Experimental stability-constrained GH fit for the true MDF.
+
+        This fit:
+            - retains all finite, non-negative true-MDF bins;
+            - uses the direct MDF mean and width as starting values;
+            - requires sigma >= 0.12 dex;
+            - restricts |h3| and |h4| to 0.15;
+            - penalizes negative model values;
+            - penalizes artificial between-bin peaks;
+            - does not alter the original true-MDF GH fit.
+        """
+
+        from scipy.optimize import least_squares
+
+        xgrid = np.asarray(xgrid, dtype=float)
+        data = np.asarray(ydata, dtype=float)
+
+        valid = (
+            np.isfinite(xgrid)
+            & np.isfinite(data)
+            & (data >= 0.0)
+        )
+
+        x = xgrid[valid]
+        y = data[valid]
+
+        if len(x) < 6:
+            print(
+                "Constrained true GH fit skipped: "
+                "fewer than six valid metallicity bins."
+            )
+            return None
+
+        total = np.sum(y)
+
+        if not np.isfinite(total) or total <= 0.0:
+            print(
+                "Constrained true GH fit skipped: "
+                "invalid MDF normalization."
+            )
+            return None
+
+        y = y / total
+
+        # Direct MDF estimates provide bin-specific starting values.
+        mu0 = np.sum(x * y)
+
+        variance0 = np.sum(
+            y * (x - mu0)**2
+        )
+
+        sigma0 = np.sqrt(
+            max(variance0, 0.12**2)
+        )
+
+        sigma0 = np.clip(
+            sigma0,
+            0.12,
+            0.55
+        )
+
+        A0 = np.max(y)
+
+        sigma_min = 0.12
+        h_limit = 0.15
+        maximum_allowed_peak = 1.35 * np.max(y)
+
+        lower_bounds = np.array([
+            0.0,
+            np.min(x) - 0.25,
+            sigma_min,
+            -h_limit,
+            -h_limit
+        ])
+
+        upper_bounds = np.array([
+            1.35 * A0,
+            np.max(x) + 0.25,
+            0.75,
+            h_limit,
+            h_limit
+        ])
+
+        dense_test_grid = np.linspace(
+            np.min(x),
+            np.max(x),
+            500
+        )
+
+        def constrained_residuals(parameters):
+            model_at_data = gauss_hermite(
+                x,
+                *parameters
+            )
+
+            model_dense = gauss_hermite(
+                dense_test_grid,
+                *parameters
+            )
+
+            data_residuals = (
+                model_at_data - y
+            )
+
+            # Penalize non-physical negative MDF values.
+            negative_penalty = np.sqrt(100.0) * np.minimum(
+                model_dense,
+                0.0
+            )
+
+            # Penalize artificial peaks between metallicity bins.
+            peak_penalty = np.sqrt(100.0) * np.maximum(
+                model_dense - maximum_allowed_peak,
+                0.0
+            )
+
+            return np.concatenate([
+                data_residuals,
+                negative_penalty,
+                peak_penalty
+            ])
+
+        h_start_values = [
+            -0.075,
+            0.0,
+            0.075
+        ]
+
+        best_result = None
+        best_score = np.inf
+
+        for h3_start in h_start_values:
+            for h4_start in h_start_values:
+
+                initial_parameters = np.array([
+                    min(A0, 0.95 * upper_bounds[0]),
+                    mu0,
+                    sigma0,
+                    h3_start,
+                    h4_start
+                ])
+
+                try:
+                    result = least_squares(
+                        constrained_residuals,
+                        initial_parameters,
+                        bounds=(lower_bounds, upper_bounds),
+                        max_nfev=100000,
+                        x_scale='jac'
+                    )
+
+                    if not result.success:
+                        continue
+
+                    score = np.sum(
+                        constrained_residuals(result.x)**2
+                    )
+
+                    if score < best_score:
+                        best_score = score
+                        best_result = result
+
+                except (RuntimeError, ValueError, FloatingPointError):
+                    continue
+
+        if best_result is None:
+            print(
+                "Constrained true GH fit failed after "
+                "all starting points."
+            )
+            return None
+
+        A, mu, sigma, h3, h4 = best_result.x
+
+        x_dense = np.linspace(
+            np.min(xgrid),
+            np.max(xgrid),
+            500
+        )
+
+        fit_y_dense = gauss_hermite(
+            x_dense,
+            A,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        ax.plot(
+            x_dense,
+            fit_y_dense,
+            color=color,
+            linestyle=':',
+            linewidth=2.4,
+            alpha=0.95,
+            label=label if do_label else None,
+            zorder=5
+        )
+
+        model_at_data = gauss_hermite(
+            x,
+            A,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        rmse = np.sqrt(
+            np.mean((y - model_at_data)**2)
+        )
+
+        return {
+            'A': float(A),
+            'mu': float(mu),
+            'sigma': float(sigma),
+            'h3': float(h3),
+            'h4': float(h4),
+            'rmse': float(rmse),
+            'fitting_strategy': 'true constrained diagnostic'
+        }
+
+    # ---------------- LOOP OVER SPATIAL BINS ----------------
     for j in range(nz):
         z0 = zbin[j]
         z1 = zbin[j + 1]
@@ -583,14 +950,14 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
             r1 = rbin[col + 1]
 
             ax = axes[-j - 1, col]
-            ax.tick_params(direction="in")
+            ax.tick_params(direction='in')
 
-            # Hide x tick labels except bottom row
+            # Hide x tick labels except along the bottom row.
             if j != 0:
-                ax.xaxis.set_ticklabels([])
+                ax.tick_params(labelbottom=False)
 
-            # If this (z,r) combo doesn’t exist, blank the panel
             key = (z0, z1, r0, r1)
+
             if key not in bin_map:
                 ax.set_axis_off()
                 continue
@@ -599,141 +966,2182 @@ def plot_mh_alpha_rz_hist(weights_values, weights_true_values, rbin, zbin, d,
 
             # ---------------- PANEL LABELS ----------------
             ax.text(
-                0.5, title_y_z,
+                0.5,
+                title_y_z,
                 rf'$\mathbf{{{z0}<|z|/\mathrm{{kpc}}<{z1}}}$',
-                ha='center', va='top',
+                ha='center',
+                va='top',
                 transform=ax.transAxes,
-                fontsize=panel_fs, fontweight='bold'
+                fontsize=panel_fs,
+                fontweight='bold'
             )
 
             ax.text(
-                0.5, title_y_r,
-                rf'$\mathbf{{{r0}<R_{{\rm}}/\mathrm{{kpc}}<{r1}}}$',
-                ha='center', va='top',
+                0.5,
+                title_y_r,
+                rf'$\mathbf{{{r0}<R_{{\mathrm{{proj}}}}/\mathrm{{kpc}}<{r1}}}$',
+                ha='center',
+                va='top',
                 transform=ax.transAxes,
-                fontsize=panel_fs, fontweight='bold'
+                fontsize=panel_fs,
+                fontweight='bold'
             )
 
-            # ---------------- MDFs FOR ONLY α = 0.0 ----------------
-            data_blue = np.asarray(distri_bin_list[k][:, 0], dtype=float)
-            true_blue = np.asarray(distri_bin_true_list[k][:, 0], dtype=float)
+            # ---------------- MDFs FOR [alpha/Fe] = 0.0 ----------------
+            ppxf_mdf = np.asarray(
+                distri_bin_list[k][:, 0],
+                dtype=float
+            ).copy()
 
-            # Normalize each curve by its own sum
-            s_data = np.sum(data_blue)
-            s_true = np.sum(true_blue)
-            if s_data <= 0 or s_true <= 0:
+            true_mdf = np.asarray(
+                distri_bin_true_list[k][:, 0],
+                dtype=float
+            ).copy()
+
+            ppxf_total = np.nansum(ppxf_mdf)
+            true_total = np.nansum(true_mdf)
+
+            if (
+                not np.isfinite(ppxf_total)
+                or not np.isfinite(true_total)
+                or ppxf_total <= 0.0
+                or true_total <= 0.0
+            ):
                 ax.set_axis_off()
                 continue
 
-            data_blue /= s_data
-            true_blue /= s_true
+            ppxf_mdf /= ppxf_total
+            true_mdf /= true_total
 
-            # Plot MDFs
+            # Actual MDFs are solid; color identifies their origin.
             ax.plot(
-                metal_grid, data_blue,
-                color=blue, lw=1.8,
-                label='[α/Fe]=0.0 (pPXF)' if (j == 0 and col == 0) else None
+                metal_grid,
+                ppxf_mdf,
+                color=ppxf_color,
+                linewidth=2.0,
+                linestyle='-',
+                label=(
+                    r'pPXF MDF ([$\alpha$/Fe]=0.0)'
+                    if (j == 0 and col == 0)
+                    else None
+                ),
+                zorder=3
             )
+
             ax.plot(
-                metal_grid_true, true_blue,
-                color=blue, lw=1.4, ls=':',
-                label='[α/Fe]=0.0 (True)' if (j == 0 and col == 0) else None
+                metal_grid_true,
+                true_mdf,
+                color=true_color,
+                linewidth=2.0,
+                linestyle='-',
+                label=(
+                    r'True MDF ([$\alpha$/Fe]=0.0)'
+                    if (j == 0 and col == 0)
+                    else None
+                ),
+                zorder=2
             )
 
-            ax.set_xlim(-1, 0.5)
-            ax.set_ylim(0, 0.7)
+            ax.set_xlim(-1.0, 0.5)
+            ax.set_ylim(0.0, 0.7)
 
-            # ---------------- GH FIT + MOMENTS ----------------
+            # ---------------- FIT BOTH MDFs ----------------
             do_leg = (j == 0 and col == 0)
-            try:
-                blue_mom = _gh_fit_and_plot(
-                    ax, metal_grid, data_blue, blue,
-                    r'GH fit ($\alpha$=0.0)', do_leg
-                )
-            except Exception:
-                blue_mom = None
 
-            # Moment annotations
-            txt_y0 = 0.74
-            dy = moment_dy
-            x_blue = 0.97
+            ppxf_fit = _gh_fit_and_plot(
+                ax,
+                metal_grid,
+                ppxf_mdf,
+                ppxf_color,
+                r'pPXF MDF GH fit',
+                do_leg
+            )
 
-            if blue_mom is not None:
-                mu, sigma, h3, h4 = blue_mom
-                blue_lines = [
-                    rf'$\mu={mu:+.3f}$',
-                    rf'$\sigma={sigma:.3f}$',
-                    rf'$h_3={h3:+.3f}$',
-                    rf'$h_4={h4:+.3f}$',
+            true_fit = _gh_fit_and_plot(
+                ax,
+                metal_grid_true,
+                true_mdf,
+                true_color,
+                r'True MDF GH fit',
+                do_leg
+            )
+
+
+            true_constrained_fit = _true_constrained_gh_fit_and_plot(
+                ax,
+                metal_grid_true,
+                true_mdf,
+                constrained_color,
+                r'True MDF constrained GH fit',
+                do_leg
+            )
+
+
+            # Store both fits so the notebook can use them later.
+            fit_results.append({
+                'zbin': (float(z0), float(z1)),
+                'rbin': (float(r0), float(r1)),
+                'ppxf': ppxf_fit,
+                'true': true_fit,
+                'true_constrained': true_constrained_fit
+            })
+
+
+            # ---------------- GH PARAMETER ANNOTATIONS ----------------
+            # These are explicitly labeled as GH fit parameters.
+            txt_y0 = 0.765
+
+            if true_fit is not None:
+                true_lines = [
+                    r'$\mathbf{True\ GH}$',
+                    rf'$\mu={true_fit["mu"]:+.3f}$',
+                    rf'$\sigma={true_fit["sigma"]:.3f}$',
+                    rf'$h_3={true_fit["h3"]:+.3f}$',
+                    rf'$h_4={true_fit["h4"]:+.3f}$'
                 ]
-                for jj, t in enumerate(blue_lines):
+
+                for line_index, text_line in enumerate(true_lines):
                     ax.text(
-                        x_blue, txt_y0 - jj * dy, t,
+                        0.03,
+                        txt_y0 - line_index * moment_dy,
+                        text_line,
                         transform=ax.transAxes,
-                        ha='right', va='top',
+                        ha='left',
+                        va='top',
                         fontsize=moment_fs,
                         fontweight='bold',
-                        color=blue
+                        color=true_color,
+                        bbox={
+                            'facecolor': 'white',
+                            'edgecolor': 'none',
+                            'alpha': 0.72,
+                            'pad': 0.4
+                        }
+                    )
+
+            if ppxf_fit is not None:
+                ppxf_lines = [
+                    r'$\mathbf{pPXF\ GH}$',
+                    rf'$\mu={ppxf_fit["mu"]:+.3f}$',
+                    rf'$\sigma={ppxf_fit["sigma"]:.3f}$',
+                    rf'$h_3={ppxf_fit["h3"]:+.3f}$',
+                    rf'$h_4={ppxf_fit["h4"]:+.3f}$'
+                ]
+
+                for line_index, text_line in enumerate(ppxf_lines):
+                    ax.text(
+                        0.97,
+                        txt_y0 - line_index * moment_dy,
+                        text_line,
+                        transform=ax.transAxes,
+                        ha='right',
+                        va='top',
+                        fontsize=moment_fs,
+                        fontweight='bold',
+                        color=ppxf_color,
+                        bbox={
+                            'facecolor': 'white',
+                            'edgecolor': 'none',
+                            'alpha': 0.72,
+                            'pad': 0.4
+                        }
                     )
 
     # ---------------- GLOBAL FORMATTING ----------------
     fig.add_subplot(111, frame_on=False)
-    plt.tick_params(labelcolor="none", bottom=False, left=False)
 
-    plt.xlabel('[M/H]', fontsize=17, fontweight='bold', labelpad=22)
-    plt.ylabel(fraction_type, fontsize=17, fontweight='bold', labelpad=22)
+    plt.tick_params(
+        labelcolor='none',
+        bottom=False,
+        left=False
+    )
+
+    plt.xlabel(
+        '[M/H]',
+        fontsize=17,
+        fontweight='bold',
+        labelpad=22
+    )
+
+    plt.ylabel(
+        fraction_type,
+        fontsize=17,
+        fontweight='bold',
+        labelpad=22
+    )
 
     fig.subplots_adjust(
-        left=0.085, right=0.995,
-        top=0.88, bottom=0.12,
-        hspace=0.14, wspace=0.18
+        left=0.085,
+        right=0.995,
+        top=0.88,
+        bottom=0.12,
+        hspace=0.14,
+        wspace=0.18
     )
 
     for ax in axes.flatten():
         if not ax.axison:
             continue
 
-        ax.tick_params(axis='both', which='major',
-                       labelsize=13, width=1.6, length=6)
+        ax.tick_params(
+            axis='both',
+            which='major',
+            labelsize=13,
+            width=1.6,
+            length=6
+        )
 
         for tick in ax.get_xticklabels():
             tick.set_fontweight('bold')
+
         for tick in ax.get_yticklabels():
             tick.set_fontweight('bold')
 
         for spine in ax.spines.values():
             spine.set_linewidth(1.4)
 
-    # ---------------- LEGEND ACROSS TOP (BLUE ONLY) ----------------
+    # ---------------- CLEAR FOUR-ITEM LEGEND ----------------
     from matplotlib.lines import Line2D
 
     legend_handles = [
-        Line2D([0], [0], color=blue, lw=1.8, ls='-',
-               label=r'[$\alpha$/Fe]=0.0 (pPXF)'),
-        Line2D([0], [0], color=blue, lw=1.4, ls=':',
-               label=r'[$\alpha$/Fe]=0.0 (True)'),
-        Line2D([0], [0], color=blue, lw=2.0, ls='--',
-               label=r'GH fit ($\alpha$=0.0)')
+        Line2D(
+            [0],
+            [0],
+            color=true_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=r'True MDF ([$\alpha$/Fe]=0.0)'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=true_color,
+            linewidth=2.2,
+            linestyle='--',
+            label=r'True MDF GH fit'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=constrained_color,
+            linewidth=2.4,
+            linestyle=':',
+            label=r'True MDF constrained GH fit (test)'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=ppxf_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=r'pPXF MDF ([$\alpha$/Fe]=0.0)'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=ppxf_color,
+            linewidth=2.2,
+            linestyle='--',
+            label=r'pPXF MDF GH fit'
+        )
     ]
 
     fig.suptitle(
-        '10% Migration Efficiency Face-On MDFs',
+        figure_title,
         fontsize=18,
         fontweight='bold',
         y=0.99
     )
 
-    leg = fig.legend(
+    legend = fig.legend(
         handles=legend_handles,
-        loc='upper left',
-        ncol=3,
-        fontsize=12,
+        loc='upper center',
+        ncol=5,
+        fontsize=10,
         frameon=True,
-        bbox_to_anchor=(0.06, 0.955)
+        bbox_to_anchor=(0.5, 0.955)
     )
 
-    for t in leg.get_texts():
-        t.set_fontweight('bold')
+    for legend_text in legend.get_texts():
+        legend_text.set_fontweight('bold')
+
+    return fig, fit_results
+
+
+
+
+# =================================================================================================
+# FACE-ON MDF ROUTINES
+# =================================================================================================
+
+def cal_r_distri_bin_faceon(
+        rbin,
+        d,
+        results_table,
+        weights_values,
+        reg_dim,
+        x_center_arcsec=0.0,
+        y_center_arcsec=0.0
+):
+    """
+    Combine stellar-population weights in face-on galactocentric radial bins.
+
+    Unlike the edge-on routine, this function does not use vertical |z| bins.
+    XBIN and YBIN are treated as the two Cartesian coordinates in the
+    face-on image plane. The true in-plane galactocentric radius is
+
+        R = sqrt((XBIN - X0)^2 + (YBIN - Y0)^2).
+
+    Parameters
+    ----------
+    rbin : array-like
+        Radial-bin boundaries in kpc.
+
+    d : float
+        Distance to the mock galaxy in kpc.
+
+    results_table : astropy.table.Table
+        GIST table containing XBIN, YBIN, and BIN_ID.
+
+    weights_values : ndarray
+        Population weights with shape
+        (number of spatial bins, number of SSP templates).
+
+    reg_dim : array-like
+        SSP-grid dimensions:
+        [number of ages, number of metallicities, number of alpha values].
+
+    x_center_arcsec, y_center_arcsec : float
+        Galaxy-center coordinates in arcseconds. For the current face-on
+        mock cube, the diagnostics support using (0, 0).
+
+    Returns
+    -------
+    r_range_list : list
+        Radial intervals in kpc.
+
+    distri_bin_list : list
+        Metallicity-alpha distributions for every radial interval.
+
+    binid_list : list
+        Unique GIST BIN_ID values included in every interval.
+
+    coverage_list : list
+        Number of unique GIST bins included in every interval.
+    """
+
+    rbin = np.asarray(rbin, dtype=float)
+
+    x_arcsec = np.asarray(
+        results_table['XBIN'],
+        dtype=float
+    ) - float(x_center_arcsec)
+
+    y_arcsec = np.asarray(
+        results_table['YBIN'],
+        dtype=float
+    ) - float(y_center_arcsec)
+
+    bin_id_column = np.asarray(
+        results_table['BIN_ID'],
+        dtype=int
+    )
+
+    # Face-on angular galactocentric radius.
+    radius_arcsec = np.sqrt(
+        x_arcsec**2 + y_arcsec**2
+    )
+
+    # Convert angular radius from arcseconds to physical radius in kpc.
+    radius_kpc = (
+        radius_arcsec
+        * np.pi
+        / 180.0
+        / 3600.0
+        * float(d)
+    )
+
+    r_range_list = []
+    distri_bin_list = []
+    binid_list = []
+    coverage_list = []
+
+    for i in range(len(rbin) - 1):
+
+        r0 = float(rbin[i])
+        r1 = float(rbin[i + 1])
+
+        radial_mask = (
+            (radius_kpc >= r0)
+            & (radius_kpc < r1)
+            & (bin_id_column >= 0)
+        )
+
+        bin_ids = np.unique(
+            bin_id_column[radial_mask]
+        ).astype(int)
+
+        # Protect against malformed or out-of-range BIN_ID values.
+        bin_ids = bin_ids[
+            (bin_ids >= 0)
+            & (bin_ids < weights_values.shape[0])
+        ]
+
+        r_range_list.append(
+            np.array([r0, r1], dtype=float)
+        )
+
+        binid_list.append(bin_ids)
+        coverage_list.append(len(bin_ids))
+
+        if len(bin_ids) == 0:
+            distri_bin_list.append(None)
+            continue
+
+        # Select all GIST spatial bins in this radial annulus.
+        selected_weights = np.asarray(
+            weights_values[bin_ids, :],
+            dtype=float
+        )
+
+        # Add the population weights from every selected spatial bin.
+        summed_weights = np.nansum(
+            selected_weights,
+            axis=0
+        )
+
+        if (
+            not np.all(np.isfinite(summed_weights))
+            or np.nansum(summed_weights) <= 0.0
+        ):
+            distri_bin_list.append(None)
+            continue
+
+        # Restore the age-metallicity-alpha population grid.
+        population_grid = summed_weights.reshape(
+            tuple(np.asarray(reg_dim, dtype=int))
+        )
+
+        # Sum over stellar age. The result has shape:
+        # metallicity x alpha.
+        metal_alpha_distribution = np.nansum(
+            population_grid,
+            axis=0
+        )
+
+        distri_bin_list.append(
+            metal_alpha_distribution
+        )
+
+    return (
+        r_range_list,
+        distri_bin_list,
+        binid_list,
+        coverage_list
+    )
+
+
+def plot_mh_alpha_r_hist_faceon(
+        weights_values,
+        weights_true_values,
+        rbin,
+        d,
+        reg_dim,
+        reg_dim_true,
+        results_table,
+        metal_grid,
+        metal_grid_true,
+        fraction_type='mass fraction',
+        figure_title='Migration Efficiency Face-on MDFs',        # FACEON MDF TITLE FIGURE IS HERE!!!!
+        alpha_index=0,
+        x_center_arcsec=0.0,
+        y_center_arcsec=0.0,
+        include_true_constrained_fit=False
+):
+    """
+    Plot face-on true/input and pPXF-recovered MDFs in true radial bins.
+
+    Face-on geometry
+    ----------------
+    Each panel contains every observed GIST spatial bin satisfying
+
+        r_min <= sqrt(XBIN^2 + YBIN^2) < r_max.
+
+    There is no vertical |z| selection.
+
+    Curves
+    ------
+    Blue solid:
+        True/input MDF.
+
+    Blue dashed:
+        Gauss-Hermite fit to the true/input MDF.
+
+    Orange solid:
+        pPXF-recovered MDF.
+
+    Orange dashed:
+        Gauss-Hermite fit to the pPXF MDF.
+
+    Purple dotted, optional:
+        Stability-constrained diagnostic fit to the true MDF.
+    """
+
+    # ---------------------------------------------------------------------------------------------
+    # COLORS AND TEXT
+    # ---------------------------------------------------------------------------------------------
+
+    true_color = '#1f5a94' # Blue 
+    ppxf_color = '#e67e22' # Orange 
+    constrained_color = '#7b2cbf' # Purple 
+
+    panel_fs = 11
+    moment_fs = 7.2
+    moment_dy = 0.055
+
+    rbin = np.asarray(rbin, dtype=float)
+    metal_grid = np.asarray(metal_grid, dtype=float)
+    metal_grid_true = np.asarray(metal_grid_true, dtype=float)
+
+    fit_results = []
+
+    # ---------------------------------------------------------------------------------------------
+    # CREATE FACE-ON RADIAL DISTRIBUTIONS
+    # ---------------------------------------------------------------------------------------------
+
+    (
+        r_range_list,
+        distri_bin_list,
+        binid_list,
+        coverage_list
+    ) = cal_r_distri_bin_faceon(
+        rbin=rbin,
+        d=d,
+        results_table=results_table,
+        weights_values=weights_values,
+        reg_dim=reg_dim,
+        x_center_arcsec=x_center_arcsec,
+        y_center_arcsec=y_center_arcsec
+    )
+
+    (
+        r_range_true_list,
+        distri_bin_true_list,
+        binid_true_list,
+        coverage_true_list
+    ) = cal_r_distri_bin_faceon(
+        rbin=rbin,
+        d=d,
+        results_table=results_table,
+        weights_values=weights_true_values,
+        reg_dim=reg_dim_true,
+        x_center_arcsec=x_center_arcsec,
+        y_center_arcsec=y_center_arcsec
+    )
+
+    nr = len(rbin) - 1
+
+    fig, axes = plt.subplots(
+        1,
+        nr,
+        figsize=(3.1 * nr, 3.6),
+        sharey=True,
+        squeeze=False
+    )
+
+    # ---------------------------------------------------------------------------------------------
+    # STANDARD GAUSS-HERMITE FIT
+    # ---------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------
+    # FACE-ON STABILITY-CONSTRAINED GAUSS-HERMITE FIT
+    # ---------------------------------------------------------------------------------------------
+
+    def _gh_fit_and_plot(
+            ax,
+            xgrid,
+            ydata,
+            color,
+            label,
+            do_label
+    ):
+        """
+        Fit a stability-constrained fourth-order Gauss-Hermite model
+        to one face-on MDF.
+
+        This fitter is used identically for the true and pPXF MDFs.
+
+        Face-on stability choices
+        -------------------------
+        1. Uses all finite, non-negative metallicity bins.
+        2. Normalizes the MDF before fitting.
+        3. Initializes mu and sigma from the direct MDF moments.
+        4. Prevents sigma from collapsing into an artificial narrow spike.
+        5. Restricts h3 and h4 to moderate values.
+        6. Penalizes negative fitted mass fractions.
+        7. Penalizes peaks far above the observed MDF.
+        8. Penalizes solutions that move too far from the direct MDF
+           mean and width.
+        9. Tests several starting values and retains the best solution.
+        10. Falls back to a Gaussian-shaped solution when no stable
+            Gauss-Hermite solution is found.
+        """
+
+        from scipy.optimize import least_squares
+
+        xgrid = np.asarray(
+            xgrid,
+            dtype=float
+        )
+
+        data = np.asarray(
+            ydata,
+            dtype=float
+        )
+
+        valid = (
+            np.isfinite(xgrid)
+            & np.isfinite(data)
+            & (data >= 0.0)
+        )
+
+        x = xgrid[valid]
+        y = data[valid]
+
+        if len(x) < 6:
+            print(
+                "Face-on GH fit skipped: "
+                "fewer than six valid metallicity bins."
+            )
+            return None
+
+        total = np.sum(y)
+
+        if (
+            not np.isfinite(total)
+            or total <= 0.0
+        ):
+            print(
+                "Face-on GH fit skipped: "
+                "invalid MDF normalization."
+            )
+            return None
+
+        # Normalize the MDF used by the fitter.
+        y = y / total
+
+        # -----------------------------------------------------------------------------------------
+        # DIRECT MDF MOMENTS
+        # -----------------------------------------------------------------------------------------
+
+        direct_mu = np.sum(
+            x * y
+        )
+
+        direct_variance = np.sum(
+            y * (x - direct_mu)**2
+        )
+
+        direct_sigma = np.sqrt(
+            max(
+                direct_variance,
+                0.12**2
+            )
+        )
+
+        direct_sigma = np.clip(
+            direct_sigma,
+            0.12,
+            0.55
+        )
+
+        observed_peak = np.max(y)
+
+        # -----------------------------------------------------------------------------------------
+        # FACE-ON FITTING CONSTRAINTS
+        # -----------------------------------------------------------------------------------------
+
+        sigma_min = 0.10
+        sigma_max = 0.65
+
+        h_limit = 0.18
+
+        maximum_allowed_peak = (
+            1.35 * observed_peak
+        )
+
+        minimum_allowed_mu = max(
+            np.min(x) - 0.10,
+            direct_mu - 0.30
+        )
+
+        maximum_allowed_mu = min(
+            np.max(x) + 0.10,
+            direct_mu + 0.30
+        )
+
+        amplitude_upper = max(
+            1.50 * observed_peak,
+            observed_peak + 1.0e-8
+        )
+
+        lower_bounds = np.array([
+            0.0,
+            minimum_allowed_mu,
+            sigma_min,
+            -h_limit,
+            -h_limit
+        ])
+
+        upper_bounds = np.array([
+            amplitude_upper,
+            maximum_allowed_mu,
+            sigma_max,
+            h_limit,
+            h_limit
+        ])
+
+        dense_x = np.linspace(
+            np.min(x),
+            np.max(x),
+            600
+        )
+
+        # -----------------------------------------------------------------------------------------
+        # PENALIZED RESIDUAL FUNCTION
+        # -----------------------------------------------------------------------------------------
+
+        def residuals(parameters):
+
+            amplitude, mu, sigma, h3, h4 = parameters
+
+            model_at_data = gauss_hermite(
+                x,
+                amplitude,
+                mu,
+                sigma,
+                h3,
+                h4
+            )
+
+            model_dense = gauss_hermite(
+                dense_x,
+                amplitude,
+                mu,
+                sigma,
+                h3,
+                h4
+            )
+
+            # Ordinary data residuals.
+            data_residuals = (
+                model_at_data - y
+            )
+
+            # MDFs cannot be negative.
+            negative_penalty = (
+                np.sqrt(250.0)
+                * np.minimum(
+                    model_dense,
+                    0.0
+                )
+            )
+
+            # Prevent artificial peaks between discrete metallicity bins.
+            peak_penalty = (
+                np.sqrt(150.0)
+                * np.maximum(
+                    model_dense
+                    - maximum_allowed_peak,
+                    0.0
+                )
+            )
+
+            # Keep fitted mu reasonably close to the direct MDF mean.
+            mu_penalty = np.array([
+                np.sqrt(2.0)
+                * (
+                    mu - direct_mu
+                )
+                / 0.15
+            ])
+
+            # Keep fitted sigma reasonably close to the direct MDF width.
+            sigma_penalty = np.array([
+                np.sqrt(3.0)
+                * (
+                    sigma - direct_sigma
+                )
+                / 0.12
+            ])
+
+            # Mild regularization discourages unnecessary extreme
+            # higher-order terms while still allowing real asymmetry.
+            h3_penalty = np.array([
+                np.sqrt(0.75)
+                * h3
+                / 0.12
+            ])
+
+            h4_penalty = np.array([
+                np.sqrt(0.75)
+                * h4
+                / 0.12
+            ])
+
+            return np.concatenate([
+                data_residuals,
+                negative_penalty,
+                peak_penalty,
+                mu_penalty,
+                sigma_penalty,
+                h3_penalty,
+                h4_penalty
+            ])
+
+        # -----------------------------------------------------------------------------------------
+        # MULTIPLE STARTING POINTS
+        # -----------------------------------------------------------------------------------------
+
+        h_start_values = [
+            -0.10,
+            -0.05,
+            0.0,
+            0.05,
+            0.10
+        ]
+
+        sigma_start_values = np.unique(
+            np.clip(
+                np.array([
+                    direct_sigma,
+                    0.85 * direct_sigma,
+                    1.15 * direct_sigma
+                ]),
+                sigma_min,
+                sigma_max
+            )
+        )
+
+        best_result = None
+        best_score = np.inf
+
+        for sigma_start in sigma_start_values:
+            for h3_start in h_start_values:
+                for h4_start in h_start_values:
+
+                    initial_parameters = np.array([
+                        min(
+                            observed_peak,
+                            0.95 * amplitude_upper
+                        ),
+                        np.clip(
+                            direct_mu,
+                            minimum_allowed_mu,
+                            maximum_allowed_mu
+                        ),
+                        sigma_start,
+                        h3_start,
+                        h4_start
+                    ])
+
+                    try:
+                        result = least_squares(
+                            residuals,
+                            initial_parameters,
+                            bounds=(
+                                lower_bounds,
+                                upper_bounds
+                            ),
+                            max_nfev=100000,
+                            x_scale="jac",
+                            ftol=1.0e-10,
+                            xtol=1.0e-10,
+                            gtol=1.0e-10
+                        )
+
+                    except (
+                        RuntimeError,
+                        ValueError,
+                        FloatingPointError
+                    ):
+                        continue
+
+                    if (
+                        not result.success
+                        or not np.all(
+                            np.isfinite(result.x)
+                        )
+                    ):
+                        continue
+
+                    candidate_model = gauss_hermite(
+                        dense_x,
+                        *result.x
+                    )
+
+                    if not np.all(
+                        np.isfinite(candidate_model)
+                    ):
+                        continue
+
+                    amplitude, mu, sigma, h3, h4 = result.x
+
+                    # Reject clearly unstable solutions.
+                    if np.min(candidate_model) < -0.005:
+                        continue
+
+                    if (
+                        np.max(candidate_model)
+                        > 1.40 * observed_peak
+                    ):
+                        continue
+
+                    if (
+                        sigma
+                        <= sigma_min + 0.005
+                    ):
+                        continue
+
+                    if (
+                        abs(h3)
+                        >= h_limit - 0.005
+                    ):
+                        continue
+
+                    if (
+                        abs(h4)
+                        >= h_limit - 0.005
+                    ):
+                        continue
+
+                    score = np.sum(
+                        residuals(result.x)**2
+                    )
+
+                    if score < best_score:
+                        best_score = score
+                        best_result = result
+
+        # -----------------------------------------------------------------------------------------
+        # GAUSSIAN FALLBACK
+        # -----------------------------------------------------------------------------------------
+
+        fitting_strategy = (
+            "face-on constrained Gauss-Hermite"
+        )
+
+        if best_result is None:
+
+            print(
+                "No stable face-on GH solution found; "
+                "using Gaussian fallback with h3 = h4 = 0."
+            )
+
+            def gaussian_residuals(parameters):
+
+                amplitude, mu, sigma = parameters
+
+                model_at_data = gauss_hermite(
+                    x,
+                    amplitude,
+                    mu,
+                    sigma,
+                    0.0,
+                    0.0
+                )
+
+                model_dense = gauss_hermite(
+                    dense_x,
+                    amplitude,
+                    mu,
+                    sigma,
+                    0.0,
+                    0.0
+                )
+
+                data_residuals = (
+                    model_at_data - y
+                )
+
+                negative_penalty = (
+                    np.sqrt(250.0)
+                    * np.minimum(
+                        model_dense,
+                        0.0
+                    )
+                )
+
+                peak_penalty = (
+                    np.sqrt(150.0)
+                    * np.maximum(
+                        model_dense
+                        - maximum_allowed_peak,
+                        0.0
+                    )
+                )
+
+                mu_penalty = np.array([
+                    np.sqrt(2.0)
+                    * (
+                        mu - direct_mu
+                    )
+                    / 0.15
+                ])
+
+                sigma_penalty = np.array([
+                    np.sqrt(3.0)
+                    * (
+                        sigma - direct_sigma
+                    )
+                    / 0.12
+                ])
+
+                return np.concatenate([
+                    data_residuals,
+                    negative_penalty,
+                    peak_penalty,
+                    mu_penalty,
+                    sigma_penalty
+                ])
+
+            gaussian_initial = np.array([
+                min(
+                    observed_peak,
+                    0.95 * amplitude_upper
+                ),
+                np.clip(
+                    direct_mu,
+                    minimum_allowed_mu,
+                    maximum_allowed_mu
+                ),
+                direct_sigma
+            ])
+
+            try:
+                gaussian_result = least_squares(
+                    gaussian_residuals,
+                    gaussian_initial,
+                    bounds=(
+                        np.array([
+                            0.0,
+                            minimum_allowed_mu,
+                            sigma_min
+                        ]),
+                        np.array([
+                            amplitude_upper,
+                            maximum_allowed_mu,
+                            sigma_max
+                        ])
+                    ),
+                    max_nfev=100000,
+                    x_scale="jac",
+                    ftol=1.0e-10,
+                    xtol=1.0e-10,
+                    gtol=1.0e-10
+                )
+
+            except (
+                RuntimeError,
+                ValueError,
+                FloatingPointError
+            ):
+                print(
+                    "Face-on Gaussian fallback also failed."
+                )
+                return None
+
+            if (
+                not gaussian_result.success
+                or not np.all(
+                    np.isfinite(
+                        gaussian_result.x
+                    )
+                )
+            ):
+                print(
+                    "Face-on Gaussian fallback returned "
+                    "an invalid solution."
+                )
+                return None
+
+            amplitude, mu, sigma = (
+                gaussian_result.x
+            )
+
+            h3 = 0.0
+            h4 = 0.0
+
+            fitting_strategy = (
+                "Gaussian fallback"
+            )
+
+        else:
+
+            amplitude, mu, sigma, h3, h4 = (
+                best_result.x
+            )
+
+        # -----------------------------------------------------------------------------------------
+        # DRAW THE FINAL FIT
+        # -----------------------------------------------------------------------------------------
+
+        plot_x = np.linspace(
+            np.min(xgrid),
+            np.max(xgrid),
+            600
+        )
+
+        plot_y = gauss_hermite(
+            plot_x,
+            amplitude,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        ax.plot(
+            plot_x,
+            plot_y,
+            linestyle="--",
+            linewidth=2.2,
+            color=color,
+            alpha=0.95,
+            label=(
+                label
+                if do_label
+                else None
+            ),
+            zorder=4
+        )
+
+        model_at_data = gauss_hermite(
+            x,
+            amplitude,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        rmse = np.sqrt(
+            np.mean(
+                (
+                    y - model_at_data
+                )**2
+            )
+        )
+
+        # Direct discrete moments are also saved for validation.
+        direct_h3 = np.sum(
+            y
+            * (
+                (
+                    x - direct_mu
+                )
+                / direct_sigma
+            )**3
+        )
+
+        direct_h4 = (
+            np.sum(
+                y
+                * (
+                    (
+                        x - direct_mu
+                    )
+                    / direct_sigma
+                )**4
+            )
+            - 3.0
+        )
+
+        return {
+            "A": float(amplitude),
+            "mu": float(mu),
+            "sigma": float(sigma),
+            "h3": float(h3),
+            "h4": float(h4),
+            "rmse": float(rmse),
+            "direct_mu": float(direct_mu),
+            "direct_sigma": float(direct_sigma),
+            "direct_skewness": float(direct_h3),
+            "direct_excess_kurtosis": float(direct_h4),
+            "fitting_strategy": fitting_strategy
+        }
+
+
+
+    # ---------------------------------------------------------------------------------------------
+    # CONSTRAINED TRUE-MDF DIAGNOSTIC FIT
+    # ---------------------------------------------------------------------------------------------
+
+    def _true_constrained_fit_and_plot(
+            ax,
+            xgrid,
+            ydata,
+            color,
+            label,
+            do_label
+    ):
+        """
+        Fit an extra-conservative Gauss-Hermite model to the true face-on MDF.
+
+        This purple dotted curve is a diagnostic comparison only.
+
+        It is intentionally more restrictive than the primary face-on
+        Gauss-Hermite fit:
+
+        1. Requires a broad, physically plausible width.
+        2. Restricts h3 and h4 to small values.
+        3. Strongly penalizes negative MDF values.
+        4. Strongly penalizes peaks above the actual true MDF.
+        5. Anchors mu and sigma to the direct discrete MDF moments.
+        6. Rejects solutions that sit against parameter boundaries.
+        7. Falls back to a Gaussian when no stable constrained GH
+           solution is available.
+        """
+
+        if not include_true_constrained_fit:
+            return None
+
+        from scipy.optimize import least_squares
+
+        xgrid = np.asarray(
+            xgrid,
+            dtype=float
+        )
+
+        data = np.asarray(
+            ydata,
+            dtype=float
+        )
+
+        valid = (
+            np.isfinite(xgrid)
+            & np.isfinite(data)
+            & (data >= 0.0)
+        )
+
+        x = xgrid[valid]
+        y = data[valid]
+
+        if len(x) < 6:
+            print(
+                "Purple face-on true GH fit skipped: "
+                "fewer than six valid metallicity bins."
+            )
+            return None
+
+        total = np.sum(y)
+
+        if (
+            not np.isfinite(total)
+            or total <= 0.0
+        ):
+            print(
+                "Purple face-on true GH fit skipped: "
+                "invalid MDF normalization."
+            )
+            return None
+
+        y = y / total
+
+        # -----------------------------------------------------------------------------------------
+        # DIRECT TRUE-MDF MOMENTS
+        # -----------------------------------------------------------------------------------------
+
+        direct_mu = np.sum(
+            x * y
+        )
+
+        direct_variance = np.sum(
+            y * (x - direct_mu)**2
+        )
+
+        direct_sigma = np.sqrt(
+            max(
+                direct_variance,
+                0.14**2
+            )
+        )
+
+        direct_sigma = np.clip(
+            direct_sigma,
+            0.14,
+            0.60
+        )
+
+        observed_peak = np.max(y)
+
+        # -----------------------------------------------------------------------------------------
+        # EXTRA-CONSERVATIVE TRUE-MDF CONSTRAINTS
+        # -----------------------------------------------------------------------------------------
+
+        sigma_min = 0.13
+        sigma_max = 0.65
+
+        h_limit = 0.12
+
+        maximum_allowed_peak = (
+            1.20 * observed_peak
+        )
+
+        minimum_allowed_mu = max(
+            np.min(x) - 0.05,
+            direct_mu - 0.22
+        )
+
+        maximum_allowed_mu = min(
+            np.max(x) + 0.05,
+            direct_mu + 0.22
+        )
+
+        amplitude_upper = max(
+            1.25 * observed_peak,
+            observed_peak + 1.0e-8
+        )
+
+        lower_bounds = np.array([
+            0.0,
+            minimum_allowed_mu,
+            sigma_min,
+            -h_limit,
+            -h_limit
+        ])
+
+        upper_bounds = np.array([
+            amplitude_upper,
+            maximum_allowed_mu,
+            sigma_max,
+            h_limit,
+            h_limit
+        ])
+
+        dense_x = np.linspace(
+            np.min(x),
+            np.max(x),
+            800
+        )
+
+        # -----------------------------------------------------------------------------------------
+        # PENALIZED RESIDUAL FUNCTION
+        # -----------------------------------------------------------------------------------------
+
+        def residuals(parameters):
+
+            amplitude, mu, sigma, h3, h4 = parameters
+
+            model_at_data = gauss_hermite(
+                x,
+                amplitude,
+                mu,
+                sigma,
+                h3,
+                h4
+            )
+
+            model_dense = gauss_hermite(
+                dense_x,
+                amplitude,
+                mu,
+                sigma,
+                h3,
+                h4
+            )
+
+            data_residuals = (
+                model_at_data - y
+            )
+
+            negative_penalty = (
+                np.sqrt(400.0)
+                * np.minimum(
+                    model_dense,
+                    0.0
+                )
+            )
+
+            peak_penalty = (
+                np.sqrt(300.0)
+                * np.maximum(
+                    model_dense
+                    - maximum_allowed_peak,
+                    0.0
+                )
+            )
+
+            mu_penalty = np.array([
+                np.sqrt(4.0)
+                * (
+                    mu - direct_mu
+                )
+                / 0.12
+            ])
+
+            sigma_penalty = np.array([
+                np.sqrt(5.0)
+                * (
+                    sigma - direct_sigma
+                )
+                / 0.10
+            ])
+
+            h3_penalty = np.array([
+                np.sqrt(2.0)
+                * h3
+                / 0.08
+            ])
+
+            h4_penalty = np.array([
+                np.sqrt(2.0)
+                * h4
+                / 0.08
+            ])
+
+            return np.concatenate([
+                data_residuals,
+                negative_penalty,
+                peak_penalty,
+                mu_penalty,
+                sigma_penalty,
+                h3_penalty,
+                h4_penalty
+            ])
+
+        # -----------------------------------------------------------------------------------------
+        # MULTIPLE STARTING POINTS
+        # -----------------------------------------------------------------------------------------
+
+        h_start_values = [
+            -0.08,
+            -0.04,
+            0.0,
+            0.04,
+            0.08
+        ]
+
+        sigma_start_values = np.unique(
+            np.clip(
+                np.array([
+                    direct_sigma,
+                    0.90 * direct_sigma,
+                    1.10 * direct_sigma
+                ]),
+                sigma_min,
+                sigma_max
+            )
+        )
+
+        best_result = None
+        best_score = np.inf
+
+        for sigma_start in sigma_start_values:
+            for h3_start in h_start_values:
+                for h4_start in h_start_values:
+
+                    initial_parameters = np.array([
+                        min(
+                            observed_peak,
+                            0.95 * amplitude_upper
+                        ),
+                        np.clip(
+                            direct_mu,
+                            minimum_allowed_mu,
+                            maximum_allowed_mu
+                        ),
+                        sigma_start,
+                        h3_start,
+                        h4_start
+                    ])
+
+                    try:
+                        result = least_squares(
+                            residuals,
+                            initial_parameters,
+                            bounds=(
+                                lower_bounds,
+                                upper_bounds
+                            ),
+                            max_nfev=100000,
+                            x_scale="jac",
+                            ftol=1.0e-10,
+                            xtol=1.0e-10,
+                            gtol=1.0e-10
+                        )
+
+                    except (
+                        RuntimeError,
+                        ValueError,
+                        FloatingPointError
+                    ):
+                        continue
+
+                    if (
+                        not result.success
+                        or not np.all(
+                            np.isfinite(result.x)
+                        )
+                    ):
+                        continue
+
+                    candidate_model = gauss_hermite(
+                        dense_x,
+                        *result.x
+                    )
+
+                    if not np.all(
+                        np.isfinite(candidate_model)
+                    ):
+                        continue
+
+                    amplitude, mu, sigma, h3, h4 = result.x
+
+                    if np.min(candidate_model) < -0.002:
+                        continue
+
+                    if (
+                        np.max(candidate_model)
+                        > 1.23 * observed_peak
+                    ):
+                        continue
+
+                    if (
+                        sigma
+                        <= sigma_min + 0.005
+                    ):
+                        continue
+
+                    if (
+                        abs(h3)
+                        >= h_limit - 0.004
+                    ):
+                        continue
+
+                    if (
+                        abs(h4)
+                        >= h_limit - 0.004
+                    ):
+                        continue
+
+                    score = np.sum(
+                        residuals(result.x)**2
+                    )
+
+                    if score < best_score:
+                        best_score = score
+                        best_result = result
+
+        # -----------------------------------------------------------------------------------------
+        # CONSERVATIVE GAUSSIAN FALLBACK
+        # -----------------------------------------------------------------------------------------
+
+        fitting_strategy = (
+            "extra-constrained face-on true GH"
+        )
+
+        if best_result is None:
+
+            print(
+                "No stable purple true-MDF GH solution found; "
+                "using conservative Gaussian fallback."
+            )
+
+            def gaussian_residuals(parameters):
+
+                amplitude, mu, sigma = parameters
+
+                model_at_data = gauss_hermite(
+                    x,
+                    amplitude,
+                    mu,
+                    sigma,
+                    0.0,
+                    0.0
+                )
+
+                model_dense = gauss_hermite(
+                    dense_x,
+                    amplitude,
+                    mu,
+                    sigma,
+                    0.0,
+                    0.0
+                )
+
+                data_residuals = (
+                    model_at_data - y
+                )
+
+                negative_penalty = (
+                    np.sqrt(400.0)
+                    * np.minimum(
+                        model_dense,
+                        0.0
+                    )
+                )
+
+                peak_penalty = (
+                    np.sqrt(300.0)
+                    * np.maximum(
+                        model_dense
+                        - maximum_allowed_peak,
+                        0.0
+                    )
+                )
+
+                mu_penalty = np.array([
+                    np.sqrt(4.0)
+                    * (
+                        mu - direct_mu
+                    )
+                    / 0.12
+                ])
+
+                sigma_penalty = np.array([
+                    np.sqrt(5.0)
+                    * (
+                        sigma - direct_sigma
+                    )
+                    / 0.10
+                ])
+
+                return np.concatenate([
+                    data_residuals,
+                    negative_penalty,
+                    peak_penalty,
+                    mu_penalty,
+                    sigma_penalty
+                ])
+
+            gaussian_initial = np.array([
+                min(
+                    observed_peak,
+                    0.95 * amplitude_upper
+                ),
+                np.clip(
+                    direct_mu,
+                    minimum_allowed_mu,
+                    maximum_allowed_mu
+                ),
+                direct_sigma
+            ])
+
+            try:
+                gaussian_result = least_squares(
+                    gaussian_residuals,
+                    gaussian_initial,
+                    bounds=(
+                        np.array([
+                            0.0,
+                            minimum_allowed_mu,
+                            sigma_min
+                        ]),
+                        np.array([
+                            amplitude_upper,
+                            maximum_allowed_mu,
+                            sigma_max
+                        ])
+                    ),
+                    max_nfev=100000,
+                    x_scale="jac",
+                    ftol=1.0e-10,
+                    xtol=1.0e-10,
+                    gtol=1.0e-10
+                )
+
+            except (
+                RuntimeError,
+                ValueError,
+                FloatingPointError
+            ):
+                print(
+                    "Purple true-MDF Gaussian fallback failed."
+                )
+                return None
+
+            if (
+                not gaussian_result.success
+                or not np.all(
+                    np.isfinite(
+                        gaussian_result.x
+                    )
+                )
+            ):
+                print(
+                    "Purple true-MDF Gaussian fallback "
+                    "returned an invalid solution."
+                )
+                return None
+
+            amplitude, mu, sigma = (
+                gaussian_result.x
+            )
+
+            h3 = 0.0
+            h4 = 0.0
+
+            fitting_strategy = (
+                "conservative Gaussian fallback"
+            )
+
+        else:
+
+            amplitude, mu, sigma, h3, h4 = (
+                best_result.x
+            )
+
+        # -----------------------------------------------------------------------------------------
+        # DRAW PURPLE DIAGNOSTIC CURVE
+        # -----------------------------------------------------------------------------------------
+
+        plot_x = np.linspace(
+            np.min(xgrid),
+            np.max(xgrid),
+            800
+        )
+
+        plot_y = gauss_hermite(
+            plot_x,
+            amplitude,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        ax.plot(
+            plot_x,
+            plot_y,
+            color=color,
+            linestyle=":",
+            linewidth=2.5,
+            alpha=0.95,
+            label=(
+                label
+                if do_label
+                else None
+            ),
+            zorder=5
+        )
+
+        model_at_data = gauss_hermite(
+            x,
+            amplitude,
+            mu,
+            sigma,
+            h3,
+            h4
+        )
+
+        rmse = np.sqrt(
+            np.mean(
+                (
+                    y - model_at_data
+                )**2
+            )
+        )
+
+        direct_skewness = np.sum(
+            y
+            * (
+                (
+                    x - direct_mu
+                )
+                / direct_sigma
+            )**3
+        )
+
+        direct_excess_kurtosis = (
+            np.sum(
+                y
+                * (
+                    (
+                        x - direct_mu
+                    )
+                    / direct_sigma
+                )**4
+            )
+            - 3.0
+        )
+
+        return {
+            "A": float(amplitude),
+            "mu": float(mu),
+            "sigma": float(sigma),
+            "h3": float(h3),
+            "h4": float(h4),
+            "rmse": float(rmse),
+            "direct_mu": float(direct_mu),
+            "direct_sigma": float(direct_sigma),
+            "direct_skewness": float(direct_skewness),
+            "direct_excess_kurtosis": float(
+                direct_excess_kurtosis
+            ),
+            "fitting_strategy": fitting_strategy
+        }
+
+
+    # ---------------------------------------------------------------------------------------------
+    # DRAW ONE PANEL PER TRUE FACE-ON RADIAL INTERVAL
+    # ---------------------------------------------------------------------------------------------
+
+    for col in range(nr):
+
+        ax = axes[0, col]
+        ax.tick_params(direction='in')
+
+        r0, r1 = r_range_list[col]
+
+        recovered_distribution = distri_bin_list[col]
+        true_distribution = distri_bin_true_list[col]
+
+        # Panel title contains only true face-on radius.
+        ax.text(
+            0.5,
+            0.965,
+            rf'$\mathbf{{{r0:g}<R/\mathrm{{kpc}}<{r1:g}}}$',
+            ha='center',
+            va='top',
+            transform=ax.transAxes,
+            fontsize=panel_fs,
+            fontweight='bold'
+        )
+
+        ax.text(
+            0.5,
+            0.885,
+            rf'$\mathbf{{N_{{\mathrm{{bin}}}}={coverage_list[col]}}}$',
+            ha='center',
+            va='top',
+            transform=ax.transAxes,
+            fontsize=8.5,
+            fontweight='bold'
+        )
+
+        if (
+            recovered_distribution is None
+            or true_distribution is None
+        ):
+            ax.set_axis_off()
+            continue
+
+        if alpha_index >= recovered_distribution.shape[1]:
+            raise IndexError(
+                f'alpha_index={alpha_index} exceeds the pPXF '
+                f'alpha-grid size {recovered_distribution.shape[1]}.'
+            )
+
+        if alpha_index >= true_distribution.shape[1]:
+            raise IndexError(
+                f'alpha_index={alpha_index} exceeds the true '
+                f'alpha-grid size {true_distribution.shape[1]}.'
+            )
+
+        # Keep the requested alpha slice. For this project alpha_index=0
+        # corresponds to [alpha/Fe] = 0.0.
+        ppxf_mdf = np.asarray(
+            recovered_distribution[:, alpha_index],
+            dtype=float
+        ).copy()
+
+        true_mdf = np.asarray(
+            true_distribution[:, alpha_index],
+            dtype=float
+        ).copy()
+
+        ppxf_total = np.nansum(ppxf_mdf)
+        true_total = np.nansum(true_mdf)
+
+        if (
+            not np.isfinite(ppxf_total)
+            or not np.isfinite(true_total)
+            or ppxf_total <= 0.0
+            or true_total <= 0.0
+        ):
+            ax.set_axis_off()
+            continue
+
+        # Normalize each MDF independently within the radial panel.
+        ppxf_mdf /= ppxf_total
+        true_mdf /= true_total
+
+        do_label = (col == 0)
+
+        # True/input MDF.
+        ax.plot(
+            metal_grid_true,
+            true_mdf,
+            color=true_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=(
+                r'True MDF ([$\alpha$/Fe]=0.0)'
+                if do_label
+                else None
+            ),
+            zorder=2
+        )
+
+        # pPXF-recovered MDF.
+        ax.plot(
+            metal_grid,
+            ppxf_mdf,
+            color=ppxf_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=(
+                r'pPXF MDF ([$\alpha$/Fe]=0.0)'
+                if do_label
+                else None
+            ),
+            zorder=3
+        )
+
+        # Fit both distributions.
+        true_fit = _gh_fit_and_plot(
+            ax,
+            metal_grid_true,
+            true_mdf,
+            true_color,
+            r'True MDF GH fit',
+            do_label
+        )
+
+        ppxf_fit = _gh_fit_and_plot(
+            ax,
+            metal_grid,
+            ppxf_mdf,
+            ppxf_color,
+            r'pPXF MDF GH fit',
+            do_label
+        )
+
+        true_constrained_fit = _true_constrained_fit_and_plot(
+            ax,
+            metal_grid_true,
+            true_mdf,
+            constrained_color,
+            r'True MDF constrained GH fit',
+            do_label
+        )
+
+        fit_results.append({
+            'rbin': (
+                float(r0),
+                float(r1)
+            ),
+            'number_of_spatial_bins': int(
+                coverage_list[col]
+            ),
+            'bin_ids': binid_list[col].copy(),
+            'ppxf': ppxf_fit,
+            'true': true_fit,
+            'true_constrained': true_constrained_fit
+        })
+
+        # -----------------------------------------------------------------------------------------
+        # GH PARAMETER TEXT
+        # -----------------------------------------------------------------------------------------
+
+        text_y0 = 0.79
+
+        if true_fit is not None:
+
+            true_lines = [
+                r'$\mathbf{True\ GH}$',
+                rf'$\mu={true_fit["mu"]:+.3f}$',
+                rf'$\sigma={true_fit["sigma"]:.3f}$',
+                rf'$h_3={true_fit["h3"]:+.3f}$',
+                rf'$h_4={true_fit["h4"]:+.3f}$'
+            ]
+
+            for line_index, text_line in enumerate(
+                true_lines
+            ):
+                ax.text(
+                    0.03,
+                    text_y0 - line_index * moment_dy,
+                    text_line,
+                    transform=ax.transAxes,
+                    ha='left',
+                    va='top',
+                    fontsize=moment_fs,
+                    fontweight='bold',
+                    color=true_color,
+                    bbox={
+                        'facecolor': 'white',
+                        'edgecolor': 'none',
+                        'alpha': 0.72,
+                        'pad': 0.4
+                    }
+                )
+
+        if ppxf_fit is not None:
+
+            ppxf_lines = [
+                r'$\mathbf{pPXF\ GH}$',
+                rf'$\mu={ppxf_fit["mu"]:+.3f}$',
+                rf'$\sigma={ppxf_fit["sigma"]:.3f}$',
+                rf'$h_3={ppxf_fit["h3"]:+.3f}$',
+                rf'$h_4={ppxf_fit["h4"]:+.3f}$'
+            ]
+
+            for line_index, text_line in enumerate(
+                ppxf_lines
+            ):
+                ax.text(
+                    0.97,
+                    text_y0 - line_index * moment_dy,
+                    text_line,
+                    transform=ax.transAxes,
+                    ha='right',
+                    va='top',
+                    fontsize=moment_fs,
+                    fontweight='bold',
+                    color=ppxf_color,
+                    bbox={
+                        'facecolor': 'white',
+                        'edgecolor': 'none',
+                        'alpha': 0.72,
+                        'pad': 0.4
+                    }
+                )
+
+        ax.set_xlim(-1.0, 0.5)
+        ax.set_ylim(0.0, 0.7)
+
+    # ---------------------------------------------------------------------------------------------
+    # GLOBAL FIGURE FORMATTING
+    # ---------------------------------------------------------------------------------------------
+
+    global_axis = fig.add_subplot(
+        111,
+        frame_on=False
+    )
+
+    global_axis.tick_params(
+        labelcolor='none',
+        bottom=False,
+        left=False
+    )
+
+    global_axis.set_xlabel(
+        '[M/H]',
+        fontsize=17,
+        fontweight='bold',
+        labelpad=22
+    )
+
+    global_axis.set_ylabel(
+        fraction_type,
+        fontsize=17,
+        fontweight='bold',
+        labelpad=22
+    )
+
+    fig.subplots_adjust(
+        left=0.075,
+        right=0.995,
+        top=0.79,
+        bottom=0.18,
+        wspace=0.18
+    )
+
+    for ax in axes.flatten():
+
+        if not ax.axison:
+            continue
+
+        ax.tick_params(
+            axis='both',
+            which='major',
+            labelsize=12,
+            width=1.5,
+            length=6
+        )
+
+        for tick in ax.get_xticklabels():
+            tick.set_fontweight('bold')
+
+        for tick in ax.get_yticklabels():
+            tick.set_fontweight('bold')
+
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.4)
+
+    # ---------------------------------------------------------------------------------------------
+    # LEGEND
+    # ---------------------------------------------------------------------------------------------
+
+    from matplotlib.lines import Line2D
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=true_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=r'True MDF ([$\alpha$/Fe]=0.0)'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=true_color,
+            linewidth=2.2,
+            linestyle='--',
+            label=r'True MDF GH fit'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=ppxf_color,
+            linewidth=2.0,
+            linestyle='-',
+            label=r'pPXF MDF ([$\alpha$/Fe]=0.0)'
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=ppxf_color,
+            linewidth=2.2,
+            linestyle='--',
+            label=r'pPXF MDF GH fit'
+        )
+    ]
+
+    if include_true_constrained_fit:
+        legend_handles.insert(
+            2,
+            Line2D(
+                [0],
+                [0],
+                color=constrained_color,
+                linewidth=2.4,
+                linestyle=':',
+                label=r'True MDF constrained GH fit'
+            )
+        )
+
+    fig.suptitle(
+        figure_title,
+        fontsize=18,
+        fontweight='bold',
+        y=0.985
+    )
+
+    legend = fig.legend(
+        handles=legend_handles,
+        loc='upper center',
+        ncol=len(legend_handles),
+        fontsize=10,
+        frameon=True,
+        bbox_to_anchor=(0.5, 0.91)
+    )
+
+    for legend_text in legend.get_texts():
+        legend_text.set_fontweight('bold')
 
     return fig, fit_results
 
